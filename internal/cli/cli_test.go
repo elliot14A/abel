@@ -27,7 +27,6 @@ jobs:
       - run: xcodebuild
 `
 
-// repo builds a throwaway checkout with a workflow in it.
 func repo(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
@@ -46,9 +45,6 @@ type result struct {
 	stdout, stderr string
 }
 
-// invoke drives the CLI exactly as main does, in-process. Commands that need a
-// Docker daemon are covered by the docker package's integration suite; these
-// cover the transport itself — parsing, wiring, output and exit codes.
 func invoke(t *testing.T, root string, args ...string) result {
 	t.Helper()
 	var out, errOut bytes.Buffer
@@ -167,8 +163,7 @@ func TestHelpIsAvailableAndDescribesTheTool(t *testing.T) {
 	t.Parallel()
 
 	got := invoke(t, repo(t), "--help")
-	// kong writes help to stdout and reports it via a special error; either way
-	// the user must see the commands.
+
 	combined := got.stdout + got.stderr
 	for _, want := range []string{"run", "mcp", "jobs", "failure"} {
 		if !strings.Contains(combined, want) {

@@ -13,10 +13,6 @@ import (
 	"github.com/elliot14A/abel/internal/infra/store"
 )
 
-// TestFailureStoreContract runs one suite against every FailureStore adapter.
-//
-// This is the test that earns the right to use the in-memory store as a fast
-// double elsewhere: whatever it proves about Memory, it proves about File too.
 func TestFailureStoreContract(t *testing.T) {
 	t.Parallel()
 
@@ -115,8 +111,6 @@ func TestFailureStoreContract(t *testing.T) {
 			})
 
 			t.Run("a job name that escapes the store is rejected", func(t *testing.T) {
-				// Memory has no filesystem to escape, so it may accept these;
-				// the contract only requires that neither adapter misbehaves.
 				for _, jobID := range []string{"../escape", "a/b"} {
 					f := sampleFailure(jobID)
 					if err := s.Put(ctx, f); err != nil && errs.KindOf(err) != errs.KindValidation {
@@ -144,7 +138,7 @@ func TestFileStoreReportsACorruptRecord(t *testing.T) {
 	if got := errs.KindOf(err); got != errs.KindValidation {
 		t.Fatalf("kind = %q, want VALIDATION (err: %v)", got, err)
 	}
-	// The message must tell the user how to recover.
+
 	if !contains(err.Error(), "lint.json") {
 		t.Errorf("error does not name the file to delete: %v", err)
 	}

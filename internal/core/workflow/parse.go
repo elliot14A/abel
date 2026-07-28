@@ -15,19 +15,7 @@ import (
 
 const opParse = "workflow.Parse"
 
-// Parse decodes a workflow document. path is used only for diagnostics and to
-// derive a name when the document has none; nothing is read from disk.
-//
-// Decode errors are returned as KindValidation and carry goccy's annotated
-// source excerpt, so the message points at the offending line and column.
 func Parse(path string, data []byte) (f File, err error) {
-	// The decoder is third-party code fed untrusted input: abel parses whatever
-	// workflow file a repository happens to contain. goccy v1.19.2 panics on
-	// some malformed documents (a YAML tag where a sequence is expected, found
-	// by FuzzParse and kept in testdata/fuzz). A panic escaping into `abel run`
-	// would be a crash report instead of "line 3: invalid runs-on", so this one
-	// boundary converts it into an ordinary validation error. This is the only
-	// recover in the codebase; do not copy the pattern inward.
 	defer func() {
 		if r := recover(); r != nil {
 			f = File{}
@@ -76,10 +64,6 @@ func parse(path string, data []byte) (File, error) {
 	return f, nil
 }
 
-// jobIDsInOrder recovers declaration order from the AST, because decoding into
-// a map loses it and every user-visible listing must be stable. If the AST walk
-// finds nothing (an unusual document shape), it falls back to the map keys in
-// sorted order rather than returning a non-deterministic list.
 func jobIDsInOrder(f *ast.File, jobs map[string]rawJob) []string {
 	ordered := make([]string, 0, len(jobs))
 	seen := make(map[string]bool, len(jobs))
@@ -101,7 +85,6 @@ func jobIDsInOrder(f *ast.File, jobs map[string]rawJob) []string {
 		}
 	}
 	if len(ordered) != len(jobs) || len(seen) == 0 {
-		// Fallback path: guarantee determinism even if the AST shape surprised us.
 		sortStrings(ordered)
 	}
 	return ordered
@@ -115,9 +98,6 @@ func sortStrings(s []string) {
 	}
 }
 
-// lookup resolves a YAML path, returning nil when it does not match. Path
-// syntax errors are treated as "not found": positions are a nicety, never a
-// reason to fail a parse.
 func lookup(f *ast.File, path string) ast.Node {
 	p, err := yaml.PathString(path)
 	if err != nil {
@@ -138,20 +118,12 @@ func lineOf(f *ast.File, path string) int {
 	return node.GetToken().Position.Line
 }
 
-// quotePathKey escapes a job ID for use in a YAML path expression. Job IDs are
-// restricted by GitHub to [A-Za-z0-9_-], but a hand-written file can hold
-// anything, and a bad path must degrade to "no line info", not to a panic.
 func quotePathKey(key string) string {
 	if strings.ContainsAny(key, `.[]'"$ `) {
 		return "'" + strings.ReplaceAll(key, "'", "") + "'"
 	}
 	return key
 }
-
-// --- raw decoding types -----------------------------------------------------
-//
-// These mirror the YAML shapes exactly, including GitHub's polymorphic fields.
-// They exist so the exported model above can stay clean and total.
 
 type rawFile struct {
 	Name     string            `yaml:"name"`
@@ -230,7 +202,6 @@ type rawStep struct {
 	Env              scalarMap `yaml:"env"`
 }
 
-// rawContainer accepts both `container: image:tag` and the mapping form.
 type rawContainer struct {
 	Image   string
 	Env     scalarMap
@@ -255,7 +226,6 @@ func (c *rawContainer) UnmarshalYAML(data []byte) error {
 	return nil
 }
 
-// stringList accepts both `runs-on: ubuntu-latest` and `runs-on: [self-hosted, linux]`.
 type stringList []string
 
 func (l *stringList) UnmarshalYAML(data []byte) error {
@@ -274,9 +244,6 @@ func (l *stringList) UnmarshalYAML(data []byte) error {
 	return nil
 }
 
-// scalarMap decodes an `env:` block whose values may be strings, numbers or
-// booleans, normalising every value to the string an environment variable
-// actually holds.
 type scalarMap map[string]string
 
 func (m *scalarMap) UnmarshalYAML(data []byte) error {

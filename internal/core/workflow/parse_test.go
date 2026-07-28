@@ -62,11 +62,11 @@ func TestParseNormalisesPolymorphicFields(t *testing.T) {
 	if test.Container.Image != "golang:1.26" {
 		t.Errorf("container.image = %q, want golang:1.26", test.Container.Image)
 	}
-	// `CGO_ENABLED: 0` is a YAML integer; env values must survive as strings.
+
 	if diff := cmp.Diff(map[string]string{"CGO_ENABLED": "0"}, test.Container.Env); diff != "" {
 		t.Errorf("container env (-want +got):\n%s", diff)
 	}
-	// `CI: true` is a YAML boolean, likewise.
+
 	if f.Env["CI"] != "true" {
 		t.Errorf("env CI = %q, want the string %q", f.Env["CI"], "true")
 	}
@@ -86,8 +86,7 @@ func TestParseRecordsSourceLines(t *testing.T) {
 			t.Errorf("step %d has no source line", i)
 		}
 	}
-	// The typecheck step is the fourth in the fixture; its list entry begins on
-	// line 32. The line must be the start of the step, not of its `run:` key.
+
 	if got := lint.Steps[3].Line; got != 32 {
 		t.Errorf("typecheck step line = %d, want 32", got)
 	}
@@ -146,7 +145,7 @@ func TestParseErrorQuotesTheSource(t *testing.T) {
 	if err == nil {
 		t.Fatal("Parse succeeded, want an error")
 	}
-	// The whole reason for goccy over yaml.v3: the message shows the source.
+
 	if !strings.Contains(err.Error(), "bad.yml") {
 		t.Errorf("error does not name the file: %v", err)
 	}

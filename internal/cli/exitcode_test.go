@@ -38,8 +38,6 @@ func TestExitCode(t *testing.T) {
 	}
 }
 
-// TestEveryKindHasAnExitCode is the runtime half of the exhaustive linter: it
-// fails if a new Kind is added to the taxonomy without a mapping here.
 func TestEveryKindHasAnExitCode(t *testing.T) {
 	t.Parallel()
 

@@ -21,9 +21,9 @@ func TestResolveMergesEnvInPrecedenceOrder(t *testing.T) {
 
 	install := stepNamed(t, plan, "install")
 	want := map[string]string{
-		"CI":        "true",  // workflow level
-		"LOG_LEVEL": "debug", // job overrides workflow
-		"NODE_ENV":  "test",  // job level
+		"CI":        "true",
+		"LOG_LEVEL": "debug",
+		"NODE_ENV":  "test",
 	}
 	if diff := cmp.Diff(want, install.Env); diff != "" {
 		t.Errorf("install env (-want +got):\n%s", diff)
@@ -33,7 +33,7 @@ func TestResolveMergesEnvInPrecedenceOrder(t *testing.T) {
 	if lint.Env["LOG_LEVEL"] != "trace" {
 		t.Errorf("step env did not override job env: LOG_LEVEL = %q, want trace", lint.Env["LOG_LEVEL"])
 	}
-	// Merging must not alias: mutating one step's env cannot affect another's.
+
 	lint.Env["LOG_LEVEL"] = "mutated"
 	if install.Env["LOG_LEVEL"] != "debug" {
 		t.Error("step environments share backing storage")
@@ -108,8 +108,7 @@ func TestResolveSkipsUsesStepsWithAReason(t *testing.T) {
 	if !setup.Skip || !strings.Contains(setup.SkipReason, "toolchains") {
 		t.Errorf("setup-node skip reason = %q", setup.SkipReason)
 	}
-	// Skipped steps keep their index so that "step 3" means the same thing
-	// everywhere abel reports it.
+
 	for i, s := range plan.Steps {
 		if s.Index != i {
 			t.Errorf("step %d has Index %d", i, s.Index)

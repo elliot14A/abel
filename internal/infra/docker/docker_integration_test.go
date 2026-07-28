@@ -1,14 +1,10 @@
 //go:build integration
 
-// This file is the other half of the contract that runfake stands in for.
-// Everything above the run.Runner port is unit-tested against the fake; this
-// suite proves the fake is not lying, against a real daemon.
-//
-//	make test-integration
 package docker_test
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,7 +15,6 @@ import (
 	"github.com/elliot14A/abel/internal/infra/docker"
 )
 
-// testImage is deliberately tiny: the suite should cost seconds, not minutes.
 const testImage = "alpine:3"
 
 func newRunner(t *testing.T, repo string) *docker.Runner {
@@ -53,7 +48,7 @@ func TestSessionRunsStepsAndReportsExitCodes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(func() { _ = session.Close(t.Context()) })
+	t.Cleanup(func() { _ = session.Close(context.WithoutCancel(t.Context())) })
 
 	t.Run("the repository is mounted at the workdir", func(t *testing.T) {
 		var out bytes.Buffer
@@ -157,7 +152,7 @@ func TestStartOnAMissingImageIsNotFound(t *testing.T) {
 	}
 	switch errs.KindOf(err) {
 	case errs.KindNotFound, errs.KindDependency:
-		// Either is defensible: the registry may 404 or be unreachable.
+
 	default:
 		t.Errorf("kind = %q, want NOT_FOUND or DEPENDENCY_UNAVAILABLE (err: %v)", errs.KindOf(err), err)
 	}
