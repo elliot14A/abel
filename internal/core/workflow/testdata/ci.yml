@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+
+env:
+  CI: true
+  LOG_LEVEL: info
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  lint:
+    name: Lint and typecheck
+    runs-on: ubuntu-latest
+    env:
+      LOG_LEVEL: debug
+      NODE_ENV: test
+    defaults:
+      run:
+        working-directory: ./app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: install
+        run: npm ci
+      - name: typecheck
+        run: tsc --noEmit
+      - name: lint
+        run: biome check .
+        env:
+          LOG_LEVEL: trace
+
+  test:
+    runs-on: ubuntu-22.04
+    needs: [lint]
+    container:
+      image: golang:1.26
+      env:
+        CGO_ENABLED: 0
+    steps:
+      - name: unit tests
+        run: go test -race ./...
+        working-directory: ./server

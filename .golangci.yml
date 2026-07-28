@@ -1,0 +1,135 @@
+# golangci-lint v2 configuration.
+#
+# The version is pinned as a `tool` directive in go.mod, so `go tool
+# golangci-lint` runs the same binary here and in CI. Never install it globally.
+version: "2"
+
+run:
+  timeout: 3m
+  # Integration tests must be linted too, or they rot silently.
+  build-tags:
+    - integration
+
+linters:
+  default: standard
+  enable:
+    # --- correctness ---
+    - bodyclose # an unclosed HTTP body leaks a connection
+    - contextcheck # never pass context.Background where a ctx is available
+    - errorlint # compare errors with errors.Is/As, never ==
+    - exhaustive # every errs.Kind is handled in every transport mapper
+    - nilerr # do not return nil after checking err != nil
+    - noctx # no HTTP requests without a context
+    - copyloopvar
+    - durationcheck
+    - makezero
+    - reassign
+    - rowserrcheck
+    - sqlclosecheck
+    # --- the ring enforcer ---
+    - depguard
+    # --- clarity ---
+    - misspell
+    - predeclared
+    - revive
+    - unconvert
+    - usestdlibvars
+    - wastedassign
+    - godot # doc comments end in a period
+    # --- security ---
+    - gosec
+
+  settings:
+    depguard:
+      # This is what makes the architecture a build failure rather than a
+      # convention. core/ and app/ are pure: no I/O, no ambient clock, no SDKs.
+      # If you need one of these in a use-case, you need a port instead.
+      rules:
+        core-is-pure:
+          list-mode: lax
+          files:
+            - "**/internal/core/**"
+            - "!**/internal/core/**/*_test.go"
+            - "!**/internal/core/run/runfake/**"
+          deny:
+            - pkg: "os"
+              desc: "core is pure — take a port instead of touching the filesystem or environment"
+            - pkg: "os/exec"
+              desc: "core is pure — running processes belongs in internal/infra"
+            - pkg: "net/http"
+              desc: "core is pure — HTTP belongs in internal/infra"
+            - pkg: "github.com/moby/moby"
+              desc: "core must not know Docker exists; implement run.Runner in internal/infra/docker"
+            - pkg: "github.com/modelcontextprotocol/go-sdk"
+              desc: "core must not know MCP exists; adapt it in internal/mcpserver"
+            - pkg: "github.com/alecthomas/kong"
+              desc: "core must not know about the CLI; adapt it in internal/cli"
+            - pkg: "charm.land/lipgloss"
+              desc: "core must not render; formatting belongs in internal/ui"
+        app-is-framework-free:
+          list-mode: lax
+          files:
+            - "**/internal/app/**"
+            - "!**/internal/app/**/*_test.go"
+          deny:
+            - pkg: "os/exec"
+              desc: "use-cases orchestrate ports; process execution belongs in internal/infra"
+            - pkg: "github.com/moby/moby"
+              desc: "use-cases depend on run.Runner, not on Docker"
+            - pkg: "github.com/modelcontextprotocol/go-sdk"
+              desc: "use-cases are transport-agnostic"
+            - pkg: "github.com/alecthomas/kong"
+              desc: "use-cases are transport-agnostic"
+
+    errcheck:
+      # Writing to the user's terminal is the one place where a failed write
+      # leaves nothing useful to do — the channel you would report it on is the
+      # one that just failed. Every other ignored error needs an explicit `_ =`
+      # with a comment.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+
+    exhaustive:
+      # A new errs.Kind must be handled in cli.ExitCode and mcpserver.agentMessage.
+      default-signifies-exhaustive: true
+      check:
+        - switch
+
+    gosec:
+      excludes:
+        # abel's entire purpose is running the user's own commands in a
+        # container and invoking the agent command they typed after --fix.
+        - G204
+
+    revive:
+      rules:
+        - name: exported
+          disabled: false
+        - name: package-comments
+        - name: error-strings
+        - name: error-naming
+        - name: context-as-argument
+        - name: indent-error-flow
+        - name: unreachable-code
+
+  exclusions:
+    rules:
+      # Test files may reach for anything; they are the imperative shell.
+      - path: _test\.go
+        linters:
+          - gosec
+          - contextcheck
+
+formatters:
+  enable:
+    - gofmt
+    - gofumpt
+    - gci
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - prefix(github.com/elliot14A/abel)

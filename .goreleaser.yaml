@@ -1,0 +1,69 @@
+version: 2
+
+project_name: abel
+
+before:
+  hooks:
+    - go mod tidy
+    - go tool golangci-lint run
+    - go test -race ./...
+
+builds:
+  - id: abel
+    main: ./cmd/abel
+    binary: abel
+    env:
+      # abel talks to the Docker daemon over HTTP; nothing here needs cgo.
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/elliot14A/abel/internal/cli.Version={{ .Version }}
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ignore:
+      - goos: windows
+        goarch: arm64
+
+archives:
+  - formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  use: github
+  sort: asc
+  groups:
+    - title: Features
+      regexp: '^feat(\(.+\))?!?:'
+      order: 0
+    - title: Fixes
+      regexp: '^fix(\(.+\))?!?:'
+      order: 1
+    - title: Other
+      order: 99
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+
+release:
+  footer: |
+    ## Install
+
+    ```
+    go install github.com/elliot14A/abel/cmd/abel@{{ .Tag }}
+    ```
+
+    Or download a binary above. abel needs a running Docker daemon.

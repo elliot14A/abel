@@ -1,0 +1,28 @@
+name: Unsupported features
+
+jobs:
+  matrix-job:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    strategy:
+      matrix:
+        node: [20, 22]
+    steps:
+      - name: conditional
+        if: runner.os == 'Linux'
+        run: echo "${{ matrix.node }}"
+
+  mac-job:
+    runs-on: macos-14
+    steps:
+      - run: echo hi
+
+  powershell-job:
+    runs-on: ubuntu-latest
+    steps:
+      - run: Write-Host hi
+        shell: pwsh
+
+  no-runner:
+    steps:
+      - run: echo hi
