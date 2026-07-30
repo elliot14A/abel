@@ -1,18 +1,16 @@
-// Package logging builds abel's structured logger.
-//
-// Logs go to stderr as JSON so that stdout stays clean for the things a user
-// pipes — and, more importantly, so that `abel mcp` can speak JSON-RPC on
-// stdout without a log line ever corrupting the protocol stream.
 package logging
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"strings"
 )
 
-// Level parses a level name, defaulting to warn: abel's normal output is the
-// run itself, and logs are for when something is wrong.
+const runIDBytes = 4
+
 func Level(name string) slog.Level {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "debug":
@@ -28,13 +26,71 @@ func Level(name string) slog.Level {
 	}
 }
 
-// New returns a JSON logger writing to w.
-func New(w io.Writer, level slog.Level) *slog.Logger {
-	return slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{Level: level}))
+func New(stderr io.Writer, level slog.Level, file io.Writer) *slog.Logger {
+	handlers := make(fanout, 0, 2)
+	if stderr != nil {
+		handlers = append(handlers, slog.NewJSONHandler(stderr, &slog.HandlerOptions{Level: level}))
+	}
+	if file != nil {
+		handlers = append(handlers,
+			slog.NewJSONHandler(file, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	}
+	if len(handlers) == 0 {
+		return discard()
+	}
+	return slog.New(handlers)
 }
 
-// Discard returns a logger that drops everything, for tests and for the paths
-// where a logger is required but nothing should be emitted.
-func Discard() *slog.Logger {
+func discard() *slog.Logger {
 	return slog.New(slog.DiscardHandler)
+}
+
+func RunID() string {
+	var b [runIDBytes]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "unknown"
+	}
+	return hex.EncodeToString(b[:])
+}
+
+type fanout []slog.Handler
+
+func (f fanout) Enabled(ctx context.Context, level slog.Level) bool {
+	for _, h := range f {
+		if h.Enabled(ctx, level) {
+			return true
+		}
+	}
+	return false
+}
+
+func (f fanout) Handle(ctx context.Context, record slog.Record) error {
+	for _, h := range f {
+		if !h.Enabled(ctx, record.Level) {
+			continue
+		}
+		if err := h.Handle(ctx, record.Clone()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (f fanout) WithAttrs(attrs []slog.Attr) slog.Handler {
+	out := make(fanout, len(f))
+	for i, h := range f {
+		out[i] = h.WithAttrs(attrs)
+	}
+	return out
+}
+
+func (f fanout) WithGroup(name string) slog.Handler {
+	if name == "" {
+		return f
+	}
+	out := make(fanout, len(f))
+	for i, h := range f {
+		out[i] = h.WithGroup(name)
+	}
+	return out
 }
