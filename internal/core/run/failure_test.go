@@ -51,7 +51,9 @@ func TestLogTailEmptyAndReset(t *testing.T) {
 		t.Errorf("fresh tail = %v, want empty", got)
 	}
 
-	tail.AddAll([]string{"a", "b", "c"})
+	for _, line := range []string{"a", "b", "c"} {
+		tail.Add(line)
+	}
 	tail.Reset()
 	if got := tail.Lines(); len(got) != 0 {
 		t.Errorf("after Reset = %v, want empty", got)
@@ -65,7 +67,9 @@ func TestLogTailLinesIsACopy(t *testing.T) {
 	t.Parallel()
 
 	tail := run.NewLogTail(3)
-	tail.AddAll([]string{"a", "b"})
+	for _, line := range []string{"a", "b"} {
+		tail.Add(line)
+	}
 
 	lines := tail.Lines()
 	lines[0] = "mutated"
@@ -129,7 +133,6 @@ func TestFailureRedact(t *testing.T) {
 		t.Errorf("unrelated log line was altered: %q", got.LogTail[1])
 	}
 
-	// The receiver must be untouched — the runner still holds it.
 	if f.Env["GITHUB_TOKEN"] != "ghp_supersecretvalue" {
 		t.Error("Redact mutated the receiver")
 	}
@@ -146,7 +149,6 @@ func TestFailureRedactHandlesOverlappingSecrets(t *testing.T) {
 		LogTail: []string{"value=abcdef"},
 	}
 
-	// Replacing the short secret first would leave "def" dangling in the log.
 	if got := f.Redact().LogTail[0]; got != "value="+run.Redacted {
 		t.Errorf("LogTail[0] = %q, want %q", got, "value="+run.Redacted)
 	}
@@ -160,17 +162,18 @@ func TestCaptureFailureCopiesCallerState(t *testing.T) {
 		Index: 2, Name: "lint", Script: "biome check .",
 		Env: map[string]string{"CI": "true"}, WorkingDir: "/abel/workspace", SourceLine: 12,
 	}
-	logs := []string{"line one", "line two"}
+	tail := run.NewLogTail(2)
+	tail.Add("line one")
+	tail.Add("line two")
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
 
-	f := run.CaptureFailure(plan, step, 1, logs, now)
+	f := run.CaptureFailure(plan, step, 1, tail, now)
 
-	// Mutating the caller's buffers must not reach into the captured failure.
-	logs[0] = "mutated"
+	tail.Add("mutated")
 	step.Env["CI"] = "mutated"
 
 	if f.LogTail[0] != "line one" {
-		t.Errorf("LogTail aliases the caller's slice: %q", f.LogTail[0])
+		t.Errorf("LogTail follows the caller's tail after capture: %q", f.LogTail[0])
 	}
 	if f.Env["CI"] != "true" {
 		t.Errorf("Env aliases the caller's map: %q", f.Env["CI"])
@@ -207,7 +210,7 @@ func TestResultSummary(t *testing.T) {
 	if red.OK() {
 		t.Error("Result with a Failure reports OK")
 	}
-	// Steps are 0-indexed internally and 1-indexed for humans.
+
 	if got := red.Summary(); !strings.Contains(got, "step 1 (typecheck)") {
 		t.Errorf("Summary() = %q, want a 1-based step number", got)
 	}
@@ -223,5 +226,78 @@ func TestPlanRunnable(t *testing.T) {
 	mixed := run.Plan{Steps: []run.Step{{Skip: true}, {}}}
 	if !mixed.Runnable() {
 		t.Error("a plan with one live step reports not Runnable")
+	}
+}
+
+func TestRedactScrubsTheStepNameToo(t *testing.T) {
+	t.Parallel()
+
+	f := run.Failure{
+		StepName: `curl -H "Authorization: super-secret-value"`,
+		Command:  `curl -H "Authorization: super-secret-value"`,
+		LogTail:  []string{"sent super-secret-value"},
+		Env:      map[string]string{"API_TOKEN": "super-secret-value", "GREETING": "hello"},
+	}
+
+	got := f.Redact()
+	for name, field := range map[string]string{
+		"StepName": got.StepName,
+		"Command":  got.Command,
+		"LogTail":  strings.Join(got.LogTail, "\n"),
+		"Env":      got.Env["API_TOKEN"],
+	} {
+		if strings.Contains(field, "super-secret-value") {
+			t.Errorf("%s still carries the secret: %q", name, field)
+		}
+	}
+	if got.Env["GREETING"] != "hello" {
+		t.Errorf("a non-secret variable was redacted: %q", got.Env["GREETING"])
+	}
+}
+
+func TestRedactTextUsesTheSameSecretSet(t *testing.T) {
+	t.Parallel()
+
+	env := map[string]string{"DEPLOY_TOKEN": "abc123", "HOME": "/root"}
+	got := run.RedactText("push with abc123 from /root", env)
+	if strings.Contains(got, "abc123") {
+		t.Errorf("RedactText left the secret in %q", got)
+	}
+	if !strings.Contains(got, "/root") {
+		t.Errorf("RedactText scrubbed a non-secret value: %q", got)
+	}
+}
+
+func TestRedactLines(t *testing.T) {
+	t.Parallel()
+
+	env := map[string]string{"API_TOKEN": "s3cret", "GREETING": "hello"}
+	got := run.RedactLines([]string{"using s3cret now", "hello world", "s3cret again"}, env)
+	want := []string{"using *** now", "hello world", "*** again"}
+
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("mismatch (-want +got):\n%s", diff)
+	}
+	if run.RedactLines(nil, env) != nil {
+		t.Error("RedactLines(nil) should stay nil")
+	}
+}
+
+func TestCaptureFailureRecordsWhatTheTailDropped(t *testing.T) {
+	t.Parallel()
+
+	tail := run.NewLogTail(2)
+	for _, line := range []string{"one", "two", "three", "four", "five"} {
+		tail.Add(line)
+	}
+
+	f := run.CaptureFailure(run.Plan{JobID: "lint"}, run.Step{}, 1, tail,
+		time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC))
+
+	if diff := cmp.Diff([]string{"four", "five"}, f.LogTail); diff != "" {
+		t.Errorf("tail mismatch (-want +got):\n%s", diff)
+	}
+	if f.LogDropped != 3 {
+		t.Errorf("LogDropped = %d, want 3; a truncated tail must say so", f.LogDropped)
 	}
 }
