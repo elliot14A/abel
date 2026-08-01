@@ -9,35 +9,47 @@ import (
 	"github.com/elliot14A/abel/internal/core/workflow"
 )
 
-// JobRef locates a job: which document declares it, and under which ID.
 type JobRef struct {
 	JobID        string
 	JobName      string
 	WorkflowName string
 	WorkflowPath string
-	// RunsOn is shown when listing jobs, so the user can see at a glance which
-	// ones abel will be able to reproduce.
-	RunsOn []string
+	RunsOn       []string
+	Runnable     bool
+	Unsupported  string
 }
 
-// ListJobs enumerates every job abel can see. It is the use-case behind
-// `abel jobs` and behind the "did you mean" list on an unknown job.
 type ListJobs struct {
 	workflows Workflows
 }
 
-// NewListJobs builds the use-case.
 func NewListJobs(workflows Workflows) *ListJobs {
 	return &ListJobs{workflows: workflows}
 }
 
-// Execute returns every job in workflow-file order, then declaration order.
 func (u *ListJobs) Execute(ctx context.Context) ([]JobRef, error) {
 	files, err := u.workflows.Load(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return jobRefs(files), nil
+
+	refs := jobRefs(files)
+	byPath := make(map[string]workflow.File, len(files))
+	for _, f := range files {
+		byPath[f.Path] = f
+	}
+	for i, ref := range refs {
+		file, ok := byPath[ref.WorkflowPath]
+		if !ok {
+			continue
+		}
+		if _, err := workflow.Resolve(file, ref.JobID, workflow.Options{}); err != nil {
+			refs[i].Unsupported = err.Error()
+			continue
+		}
+		refs[i].Runnable = true
+	}
+	return refs, nil
 }
 
 func jobRefs(files []workflow.File) []JobRef {
@@ -62,11 +74,6 @@ func jobRefs(files []workflow.File) []JobRef {
 
 const opFindJob = "app.findJob"
 
-// findJob resolves a job ID across every workflow document.
-//
-// Two documents declaring the same job ID is a genuine ambiguity — GitHub scopes
-// job IDs per workflow, abel is asked for one by name — so it is reported as a
-// conflict rather than silently resolved to the first match.
 func findJob(files []workflow.File, jobID string) (workflow.File, error) {
 	var matches []workflow.File
 	for _, f := range files {
@@ -92,9 +99,6 @@ func findJob(files []workflow.File, jobID string) (workflow.File, error) {
 	}
 }
 
-// availableJobs renders the "available: …" suffix of a not-found message. An
-// unknown job is almost always a typo, so the alternatives belong in the error
-// itself rather than behind a second command.
 func availableJobs(files []workflow.File) string {
 	refs := jobRefs(files)
 	if len(refs) == 0 {

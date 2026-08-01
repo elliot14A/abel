@@ -19,10 +19,6 @@ import (
 	"github.com/elliot14A/abel/internal/infra/store"
 )
 
-// --- fakes for the ports this package declares ------------------------------
-
-// fakeWorkflows serves pre-parsed workflow documents. It is four lines of
-// behaviour, which is why abel has no mocking library.
 type fakeWorkflows struct {
 	files []workflow.File
 	err   error
@@ -68,8 +64,6 @@ jobs:
         run: npm test
 `
 
-// frozen returns a clock that advances a fixed step on every read, so that
-// durations are deterministic and non-zero.
 func frozen(step time.Duration) run.Clock {
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
 	return run.ClockFunc(func() time.Time {
@@ -78,14 +72,12 @@ func frozen(step time.Duration) run.Clock {
 	})
 }
 
-// --- RunJob -----------------------------------------------------------------
-
 func TestRunJobRunsEveryStepWhenGreen(t *testing.T) {
 	t.Parallel()
 
 	runner := &runfake.Runner{}
 	failures := store.NewMemory()
-	uc := app.NewRunJob(workflows(t, ciWorkflow), runner, failures, frozen(time.Second))
+	uc := app.NewRunJob(workflows(t, ciWorkflow), runner, failures, frozen(time.Second), nil)
 
 	var logs bytes.Buffer
 	result, err := uc.Execute(t.Context(), app.RunJobInput{JobID: "lint", Logs: &logs})
@@ -100,7 +92,7 @@ func TestRunJobRunsEveryStepWhenGreen(t *testing.T) {
 	if diff := cmp.Diff([]string{"install", "typecheck", "test"}, session.Executed()); diff != "" {
 		t.Errorf("executed steps (-want +got):\n%s", diff)
 	}
-	// The checkout step is reported as skipped rather than dropped.
+
 	if len(result.Steps) != 4 || !result.Steps[0].Skipped {
 		t.Errorf("skipped steps are missing from the result: %+v", result.Steps)
 	}
@@ -114,7 +106,7 @@ func TestRunJobStopsAtTheFirstFailureAndCapturesContext(t *testing.T) {
 
 	runner := runfake.Failing("typecheck", 2, "src/a.ts(3,1): error TS2304\nFound 1 error.\n")
 	failures := store.NewMemory()
-	uc := app.NewRunJob(workflows(t, ciWorkflow), runner, failures, frozen(time.Second))
+	uc := app.NewRunJob(workflows(t, ciWorkflow), runner, failures, frozen(time.Second), nil)
 
 	var logs bytes.Buffer
 	result, err := uc.Execute(t.Context(), app.RunJobInput{JobID: "lint", Logs: &logs})
@@ -125,7 +117,7 @@ func TestRunJobStopsAtTheFirstFailureAndCapturesContext(t *testing.T) {
 	if result.OK() {
 		t.Fatal("result is OK, want a failure")
 	}
-	// The step after the failing one must not have run.
+
 	if diff := cmp.Diff([]string{"install", "typecheck"}, runner.Sessions()[0].Executed()); diff != "" {
 		t.Errorf("executed steps (-want +got):\n%s", diff)
 	}
@@ -141,12 +133,10 @@ func TestRunJobStopsAtTheFirstFailureAndCapturesContext(t *testing.T) {
 		t.Errorf("failure does not point back at the workflow: source=%q line=%d", f.Source, f.Line)
 	}
 
-	// The live stream and the captured tail are both fed.
 	if !strings.Contains(logs.String(), "TS2304") {
 		t.Errorf("logs were not streamed: %q", logs.String())
 	}
 
-	// And the failure is persisted for the MCP server to serve.
 	stored, err := failures.Get(t.Context(), "lint")
 	if err != nil {
 		t.Fatalf("failure was not stored: %v", err)
@@ -160,7 +150,7 @@ func TestRunJobReportsStepsAsTheyHappen(t *testing.T) {
 	t.Parallel()
 
 	runner := runfake.Failing("typecheck", 1, "boom\n")
-	uc := app.NewRunJob(workflows(t, ciWorkflow), runner, store.NewMemory(), frozen(time.Second))
+	uc := app.NewRunJob(workflows(t, ciWorkflow), runner, store.NewMemory(), frozen(time.Second), nil)
 
 	var events []string
 	_, err := uc.Execute(t.Context(), app.RunJobInput{
@@ -192,8 +182,8 @@ func TestRunJobReportsStepsAsTheyHappen(t *testing.T) {
 func TestRunJobWorksWithoutObservers(t *testing.T) {
 	t.Parallel()
 
-	uc := app.NewRunJob(workflows(t, ciWorkflow), &runfake.Runner{}, store.NewMemory(), frozen(time.Second))
-	// Nil callbacks are the MCP transport's normal case; they must not panic.
+	uc := app.NewRunJob(workflows(t, ciWorkflow), &runfake.Runner{}, store.NewMemory(), frozen(time.Second), nil)
+
 	if _, err := uc.Execute(t.Context(), app.RunJobInput{JobID: "lint"}); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -204,7 +194,7 @@ func TestRunJobRedactsSecretsBeforeStoring(t *testing.T) {
 
 	runner := runfake.Failing("typecheck", 1, "auth failed for ghp_leakme\n")
 	failures := store.NewMemory()
-	uc := app.NewRunJob(workflows(t, ciWorkflow), runner, failures, frozen(time.Second))
+	uc := app.NewRunJob(workflows(t, ciWorkflow), runner, failures, frozen(time.Second), nil)
 
 	result, err := uc.Execute(t.Context(), app.RunJobInput{JobID: "lint"})
 	if err != nil {
@@ -229,12 +219,11 @@ func TestRunJobClearsAStaleFailureOnceGreen(t *testing.T) {
 		t.Fatalf("seed the store: %v", err)
 	}
 
-	uc := app.NewRunJob(workflows(t, ciWorkflow), &runfake.Runner{}, failures, frozen(time.Second))
+	uc := app.NewRunJob(workflows(t, ciWorkflow), &runfake.Runner{}, failures, frozen(time.Second), nil)
 	if _, err := uc.Execute(t.Context(), app.RunJobInput{JobID: "lint"}); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 
-	// An agent polling get_failure after a green run must not act on the old one.
 	if _, err := failures.Get(t.Context(), "lint"); errs.KindOf(err) != errs.KindNotFound {
 		t.Errorf("stale failure survived a green run (err: %v)", err)
 	}
@@ -246,7 +235,7 @@ func TestRunJobClosesTheSessionEvenWhenAStepCannotRun(t *testing.T) {
 	runner := &runfake.Runner{Steps: map[string]runfake.Script{
 		"install": {Err: errors.New("daemon went away")},
 	}}
-	uc := app.NewRunJob(workflows(t, ciWorkflow), runner, store.NewMemory(), frozen(time.Second))
+	uc := app.NewRunJob(workflows(t, ciWorkflow), runner, store.NewMemory(), frozen(time.Second), nil)
 
 	_, err := uc.Execute(t.Context(), app.RunJobInput{JobID: "lint"})
 	if err == nil {
@@ -264,7 +253,7 @@ func TestRunJobReportsAnUnavailableDaemonAsADependencyFailure(t *testing.T) {
 	t.Parallel()
 
 	runner := runfake.Unavailable("cannot connect to the Docker daemon")
-	uc := app.NewRunJob(workflows(t, ciWorkflow), runner, store.NewMemory(), frozen(time.Second))
+	uc := app.NewRunJob(workflows(t, ciWorkflow), runner, store.NewMemory(), frozen(time.Second), nil)
 
 	_, err := uc.Execute(t.Context(), app.RunJobInput{JobID: "lint"})
 	if got := errs.KindOf(err); got != errs.KindDependency {
@@ -281,7 +270,7 @@ func TestRunJobHonoursCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	uc := app.NewRunJob(workflows(t, ciWorkflow), &runfake.Runner{}, store.NewMemory(), frozen(time.Second))
+	uc := app.NewRunJob(workflows(t, ciWorkflow), &runfake.Runner{}, store.NewMemory(), frozen(time.Second), nil)
 	_, err := uc.Execute(ctx, app.RunJobInput{JobID: "lint"})
 	if got := errs.KindOf(err); got != errs.KindCancelled {
 		t.Errorf("kind = %q, want CANCELLED (err: %v)", got, err)
@@ -305,7 +294,7 @@ func TestRunJobAttachesAShellOnlyWhenAsked(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			runner := &runfake.Runner{}
-			uc := app.NewRunJob(workflows(t, ciWorkflow), runner, store.NewMemory(), frozen(time.Second))
+			uc := app.NewRunJob(workflows(t, ciWorkflow), runner, store.NewMemory(), frozen(time.Second), nil)
 
 			in := app.RunJobInput{JobID: "lint", Shell: tc.shell}
 			if tc.terminal {
@@ -331,7 +320,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 `
-	uc := app.NewRunJob(workflows(t, usesOnly), &runfake.Runner{}, store.NewMemory(), frozen(time.Second))
+	uc := app.NewRunJob(workflows(t, usesOnly), &runfake.Runner{}, store.NewMemory(), frozen(time.Second), nil)
 
 	_, err := uc.Execute(t.Context(), app.RunJobInput{JobID: "setup"})
 	if got := errs.KindOf(err); got != errs.KindUnsupported {
@@ -339,12 +328,10 @@ jobs:
 	}
 }
 
-// --- job lookup -------------------------------------------------------------
-
 func TestPlanReportsAnUnknownJobWithAlternatives(t *testing.T) {
 	t.Parallel()
 
-	uc := app.NewRunJob(workflows(t, ciWorkflow), &runfake.Runner{}, store.NewMemory(), frozen(time.Second))
+	uc := app.NewRunJob(workflows(t, ciWorkflow), &runfake.Runner{}, store.NewMemory(), frozen(time.Second), nil)
 
 	_, err := uc.Plan(t.Context(), "linr", workflow.Options{})
 	if got := errs.KindOf(err); got != errs.KindNotFound {
@@ -365,7 +352,7 @@ jobs:
     steps:
       - run: echo different
 `
-	uc := app.NewRunJob(workflows(t, ciWorkflow, other), &runfake.Runner{}, store.NewMemory(), frozen(time.Second))
+	uc := app.NewRunJob(workflows(t, ciWorkflow, other), &runfake.Runner{}, store.NewMemory(), frozen(time.Second), nil)
 
 	_, err := uc.Plan(t.Context(), "lint", workflow.Options{})
 	if got := errs.KindOf(err); got != errs.KindConflict {
@@ -396,15 +383,13 @@ jobs:
 	}
 
 	want := []app.JobRef{
-		{JobID: "lint", JobName: "lint", WorkflowName: "CI", WorkflowPath: ".github/workflows/a.yml", RunsOn: []string{"ubuntu-latest"}},
-		{JobID: "build", JobName: "build", WorkflowName: "b", WorkflowPath: ".github/workflows/b.yml", RunsOn: []string{"ubuntu-latest"}},
+		{JobID: "lint", JobName: "lint", WorkflowName: "CI", WorkflowPath: ".github/workflows/a.yml", RunsOn: []string{"ubuntu-latest"}, Runnable: true},
+		{JobID: "build", JobName: "build", WorkflowName: "b", WorkflowPath: ".github/workflows/b.yml", RunsOn: []string{"ubuntu-latest"}, Runnable: true},
 	}
 	if diff := cmp.Diff(want, refs); diff != "" {
 		t.Errorf("jobs (-want +got):\n%s", diff)
 	}
 }
-
-// --- GetFailure / MarkFixed -------------------------------------------------
 
 func TestGetFailure(t *testing.T) {
 	t.Parallel()
@@ -426,7 +411,7 @@ func TestGetFailure(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Execute: %v", err)
 		}
-		// Redaction on read defends against a record written by an older abel.
+
 		if got.Env["NPM_TOKEN"] != run.Redacted || strings.Contains(got.LogTail[0], "npm_leakme") {
 			t.Errorf("failure was served unredacted: %+v", got)
 		}
@@ -454,9 +439,9 @@ func TestMarkFixed(t *testing.T) {
 	if err := failures.Put(t.Context(), run.Failure{JobID: "lint", StepName: "typecheck"}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	uc := app.NewMarkFixed(failures)
+	uc := app.NewMarkFixed(failures, frozen(time.Second))
 
-	got, err := uc.Execute(t.Context(), "lint")
+	got, err := uc.Execute(t.Context(), "lint", "")
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -464,7 +449,6 @@ func TestMarkFixed(t *testing.T) {
 		t.Error("returned failure is not marked fixed")
 	}
 
-	// The record survives, so a re-run has something to compare against.
 	stored, err := failures.Get(t.Context(), "lint")
 	if err != nil {
 		t.Fatalf("the record was deleted rather than marked: %v", err)
@@ -473,8 +457,7 @@ func TestMarkFixed(t *testing.T) {
 		t.Error("the stored record is not marked fixed")
 	}
 
-	// Marking twice without a re-run is a conflict, not a silent success.
-	if _, err := uc.Execute(t.Context(), "lint"); errs.KindOf(err) != errs.KindConflict {
+	if _, err := uc.Execute(t.Context(), "lint", ""); errs.KindOf(err) != errs.KindConflict {
 		t.Errorf("second MarkFixed = %v, want CONFLICT", err)
 	}
 }
@@ -482,8 +465,156 @@ func TestMarkFixed(t *testing.T) {
 func TestMarkFixedOnAnUnknownJob(t *testing.T) {
 	t.Parallel()
 
-	uc := app.NewMarkFixed(store.NewMemory())
-	if _, err := uc.Execute(t.Context(), "nope"); errs.KindOf(err) != errs.KindNotFound {
+	uc := app.NewMarkFixed(store.NewMemory(), frozen(time.Second))
+	if _, err := uc.Execute(t.Context(), "nope", ""); errs.KindOf(err) != errs.KindNotFound {
 		t.Errorf("kind = %q, want NOT_FOUND", errs.KindOf(err))
+	}
+}
+
+func TestRunJobCapturesStepOutputOnlyWhenAsked(t *testing.T) {
+	t.Parallel()
+
+	runner := &runfake.Runner{Steps: map[string]runfake.Script{
+		"install":   {Output: "installing\ndone\n"},
+		"typecheck": {Output: "checking\n"},
+	}}
+
+	tests := []struct {
+		name    string
+		capture bool
+		want    [][]string
+	}{
+		{name: "off by default", capture: false, want: [][]string{nil, nil, nil, nil}},
+		{
+			name:    "on when requested",
+			capture: true,
+			want:    [][]string{nil, {"installing", "done"}, {"checking"}, nil},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			uc := app.NewRunJob(workflows(t, ciWorkflow), runner, store.NewMemory(),
+				frozen(time.Second), nil)
+			result, err := uc.Execute(t.Context(), app.RunJobInput{
+				JobID: "lint", CaptureOutput: tt.capture,
+			})
+			if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+
+			got := make([][]string, 0, len(result.Steps))
+			for _, s := range result.Steps {
+				got = append(got, s.Output)
+			}
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Errorf("step output mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestRunJobRedactsCapturedStepOutput(t *testing.T) {
+	t.Parallel()
+
+	runner := &runfake.Runner{Steps: map[string]runfake.Script{
+		"install": {Output: "authenticating with ghp_leakme\n"},
+	}}
+	uc := app.NewRunJob(workflows(t, ciWorkflow), runner, store.NewMemory(),
+		frozen(time.Second), nil)
+
+	result, err := uc.Execute(t.Context(), app.RunJobInput{JobID: "lint", CaptureOutput: true})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	for _, s := range result.Steps {
+		for _, line := range s.Output {
+			if strings.Contains(line, "ghp_leakme") {
+				t.Errorf("step %d output leaked the token: %q", s.Step.Index+1, line)
+			}
+		}
+	}
+	if got := result.Steps[1].Output; len(got) != 1 || !strings.Contains(got[0], run.Redacted) {
+		t.Errorf("output = %q, want the token replaced with %q", got, run.Redacted)
+	}
+}
+
+func TestMarkFixedRecordsTheClaim(t *testing.T) {
+	t.Parallel()
+
+	failures := store.NewMemory()
+	seed := run.Failure{JobID: "lint", StepName: "typecheck", ExitCode: 2}
+	if err := failures.Put(t.Context(), seed); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	uc := app.NewMarkFixed(failures, frozen(time.Second))
+	got, err := uc.Execute(t.Context(), "lint", "widened the tsconfig target")
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	if !got.Fixed {
+		t.Error("the claim was not recorded")
+	}
+	if got.FixNote != "widened the tsconfig target" {
+		t.Errorf("note = %q, want the caller's note", got.FixNote)
+	}
+	if got.FixedAt.IsZero() {
+		t.Error("FixedAt was not stamped from the injected clock")
+	}
+
+	stored, err := failures.Get(t.Context(), "lint")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if stored.FixNote != got.FixNote || !stored.FixedAt.Equal(got.FixedAt) {
+		t.Errorf("the claim was not persisted: %+v", stored)
+	}
+
+	if _, err := uc.Execute(t.Context(), "lint", "again"); errs.KindOf(err) != errs.KindConflict {
+		t.Errorf("second claim kind = %q, want CONFLICT", errs.KindOf(err))
+	}
+}
+
+func TestListJobsReportsRunnability(t *testing.T) {
+	t.Parallel()
+
+	const mixed = `
+name: CI
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  mac:
+    runs-on: macos-latest
+    steps:
+      - run: xcodebuild
+`
+	refs, err := app.NewListJobs(workflows(t, mixed)).Execute(t.Context())
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	got := map[string]app.JobRef{}
+	for _, ref := range refs {
+		got[ref.JobID] = ref
+	}
+
+	if !got["lint"].Runnable {
+		t.Errorf("lint is not marked runnable: %+v", got["lint"])
+	}
+	if got["lint"].Unsupported != "" {
+		t.Errorf("lint carries a reason it should not: %q", got["lint"].Unsupported)
+	}
+	if got["mac"].Runnable {
+		t.Error("a macos-latest job was marked runnable")
+	}
+	if !strings.Contains(got["mac"].Unsupported, "macos-latest") {
+		t.Errorf("reason = %q, want it to name the runner", got["mac"].Unsupported)
 	}
 }
