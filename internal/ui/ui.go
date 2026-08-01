@@ -1,9 +1,3 @@
-// Package ui renders abel's human-facing output.
-//
-// It is deliberately separate from logging: logs are structured records for
-// machines (internal/infra/logging), this is the thing a person watches while
-// their CI step reproduces. Every function here is a pure string builder over
-// core values, so the output is unit-testable without a terminal.
 package ui
 
 import (
@@ -18,14 +12,10 @@ import (
 	"github.com/elliot14A/abel/internal/core/run"
 )
 
-// Renderer formats abel's output. The zero value renders without colour, which
-// is what a pipe, a CI log and NO_COLOR all want.
 type Renderer struct {
 	color bool
 }
 
-// New returns a renderer. Pass color=false when stdout is not a terminal, when
-// NO_COLOR is set, or when TERM is dumb — the composition root decides.
 func New(color bool) *Renderer { return &Renderer{color: color} }
 
 func (r *Renderer) style(s lipgloss.Style, text string) string {
@@ -45,8 +35,6 @@ var (
 	styleRedBold = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
 )
 
-// PlanHeader introduces a run: what abel is about to do, and everything it has
-// decided not to do.
 func (r *Renderer) PlanHeader(plan run.Plan) string {
 	var b strings.Builder
 
@@ -71,8 +59,6 @@ func (r *Renderer) PlanHeader(plan run.Plan) string {
 	return b.String()
 }
 
-// StepStart is printed before a step runs, so a long step is visibly running
-// rather than apparently hung.
 func (r *Renderer) StepStart(step run.Step) string {
 	return fmt.Sprintf("\n%s %s %s\n",
 		r.style(styleCyan, "▸"),
@@ -80,8 +66,6 @@ func (r *Renderer) StepStart(step run.Step) string {
 		step.Name)
 }
 
-// PlannedStep is printed by --dry-run: what abel would do, without pretending
-// anything has happened yet.
 func (r *Renderer) PlannedStep(step run.Step) string {
 	if step.Skip {
 		return fmt.Sprintf("%s %s %s\n",
@@ -91,7 +75,7 @@ func (r *Renderer) PlannedStep(step run.Step) string {
 	}
 	first := strings.SplitN(step.Script, "\n", 2)[0]
 	if strings.Contains(step.Script, "\n") {
-		first += " …"
+		first += " " + ellipsis
 	}
 	return fmt.Sprintf("%s %s %s\n  %s %s\n",
 		r.style(styleCyan, "·"),
@@ -101,7 +85,6 @@ func (r *Renderer) PlannedStep(step run.Step) string {
 		r.style(styleDim, first))
 }
 
-// StepResult is printed after a step finishes.
 func (r *Renderer) StepResult(result run.StepResult) string {
 	switch {
 	case result.Skipped:
@@ -122,7 +105,6 @@ func (r *Renderer) StepResult(result run.StepResult) string {
 	}
 }
 
-// Summary closes a run.
 func (r *Renderer) Summary(result run.Result) string {
 	if result.OK() {
 		return fmt.Sprintf("\n%s %s\n", r.style(styleGreen, "PASS"), result.Summary())
@@ -130,23 +112,29 @@ func (r *Renderer) Summary(result run.Result) string {
 	return fmt.Sprintf("\n%s %s\n", r.style(styleRedBold, "FAIL"), result.Summary())
 }
 
-// Failure renders the captured failure context — the same information abel
-// serves over MCP, formatted for a person.
 func (r *Renderer) Failure(f run.Failure) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "\n%s\n", r.style(styleRedBold, "failure context"))
 	fmt.Fprintf(&b, "  %-9s %s\n", r.style(styleDim, "job"), f.JobID)
-	fmt.Fprintf(&b, "  %-9s %d — %s\n", r.style(styleDim, "step"), f.StepIndex+1, f.StepName)
+	fmt.Fprintf(&b, "  %-9s %d: %s\n", r.style(styleDim, "step"), f.StepIndex+1, f.StepName)
 	fmt.Fprintf(&b, "  %-9s %s\n", r.style(styleDim, "command"), indentContinuation(f.Command, 12))
 	fmt.Fprintf(&b, "  %-9s %d\n", r.style(styleDim, "exit"), f.ExitCode)
 	fmt.Fprintf(&b, "  %-9s %s\n", r.style(styleDim, "image"), f.Image)
 	if f.Source != "" {
 		fmt.Fprintf(&b, "  %-9s %s:%d\n", r.style(styleDim, "source"), f.Source, f.Line)
 	}
+	if f.Fixed {
+		fmt.Fprintf(&b, "  %-9s %s\n", r.style(styleDim, "claimed"), r.claim(f))
+	}
 
 	if len(f.LogTail) > 0 {
-		fmt.Fprintf(&b, "\n  %s\n", r.style(styleDim, fmt.Sprintf("last %d line(s):", len(f.LogTail))))
+		header := fmt.Sprintf("last %d line(s):", len(f.LogTail))
+		if f.LogDropped > 0 {
+			header = fmt.Sprintf("last %d line(s), %d earlier line(s) dropped:",
+				len(f.LogTail), f.LogDropped)
+		}
+		fmt.Fprintf(&b, "\n  %s\n", r.style(styleDim, header))
 		for _, line := range f.LogTail {
 			fmt.Fprintf(&b, "  %s %s\n", r.style(styleDim, "│"), line)
 		}
@@ -154,7 +142,6 @@ func (r *Renderer) Failure(f run.Failure) string {
 	return b.String()
 }
 
-// Jobs lists the jobs abel can see.
 func (r *Renderer) Jobs(refs []app.JobRef) string {
 	if len(refs) == 0 {
 		return "no jobs found\n"
@@ -169,13 +156,16 @@ func (r *Renderer) Jobs(refs []app.JobRef) string {
 		fmt.Fprintf(&b, "%s  %s\n",
 			r.style(styleBold, fmt.Sprintf("%-*s", width, ref.JobID)),
 			r.style(styleDim, fmt.Sprintf("%s  (%s)", ref.WorkflowPath, strings.Join(ref.RunsOn, ", "))))
+		if !ref.Runnable && ref.Unsupported != "" {
+			fmt.Fprintf(&b, "%s %s %s\n",
+				strings.Repeat(" ", width),
+				r.style(styleYellow, "!"),
+				r.style(styleDim, ref.Unsupported))
+		}
 	}
 	return b.String()
 }
 
-// Error renders a failed command. The Kind is shown because it is what the
-// exit code is derived from, so a scripted caller and a human see the same
-// classification.
 func (r *Renderer) Error(err error) string {
 	if err == nil {
 		return ""
@@ -188,6 +178,18 @@ func (r *Renderer) Error(err error) string {
 	return b.String()
 }
 
+func (r *Renderer) claim(f run.Failure) string {
+	var b strings.Builder
+	b.WriteString(r.style(styleYellow, "fixed but not verified"))
+	if !f.FixedAt.IsZero() {
+		fmt.Fprintf(&b, " %s", r.style(styleDim, f.FixedAt.UTC().Format(time.RFC3339)))
+	}
+	if f.FixNote != "" {
+		fmt.Fprintf(&b, "\n  %-9s %s", "", f.FixNote)
+	}
+	return b.String()
+}
+
 func duration(d time.Duration) string {
 	if d < time.Second {
 		return d.Round(time.Millisecond).String()
@@ -195,7 +197,6 @@ func duration(d time.Duration) string {
 	return d.Round(10 * time.Millisecond).String()
 }
 
-// indentContinuation keeps a multi-line `run:` block aligned under its label.
 func indentContinuation(s string, indent int) string {
 	return strings.ReplaceAll(s, "\n", "\n"+strings.Repeat(" ", indent))
 }
