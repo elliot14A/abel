@@ -1,12 +1,3 @@
-// Package mcpserver exposes abel's use-cases to a coding agent over MCP.
-//
-// This is abel's second transport, and it is the reason the rings exist: the
-// tools below are thin adapters over exactly the same use-cases the CLI drives.
-// Nothing here decides anything.
-//
-// The tool surface is the shared `agentfix` contract abel implements alongside
-// mob — run_* / get_* / mark_fixed — so an agent that can drive one can drive
-// the other.
 package mcpserver
 
 import (
@@ -14,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -24,20 +17,22 @@ import (
 	"github.com/elliot14A/abel/internal/core/workflow"
 )
 
-// UseCases are the operations the server exposes. They are passed in rather
-// than constructed here, because the composition root owns construction.
-type UseCases struct {
+type Tools struct {
 	RunJob     *app.RunJob
 	GetFailure *app.GetFailure
 	MarkFixed  *app.MarkFixed
 	ListJobs   *app.ListJobs
+	Log        *slog.Logger
 }
 
-// New builds the MCP server with abel's tools registered.
-func New(version string, uc UseCases) *mcp.Server {
+func New(version string, t Tools) *mcp.Server {
+	log := t.Log
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "abel",
-		Title:   "abel — local CI reproduction",
+		Title:   "abel - local CI reproduction",
 		Version: version,
 	}, nil)
 
@@ -47,50 +42,53 @@ func New(version string, uc UseCases) *mcp.Server {
 			"with the workflow file each comes from. Call this first if you do not " +
 			"know the job name.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
-	}, wrap(listJobs(uc.ListJobs)))
+	}, wrap(log, listJobs(t.ListJobs)))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "run_job",
 		Description: "Reproduce a workflow job locally in Docker and report the result. " +
 			"On failure the failure context is captured and can be read with get_failure. " +
 			"This starts a container and runs the job's shell steps against the working tree, " +
-			"so it modifies files exactly as CI would.",
+			"so it modifies files exactly as CI would. Set `output` to \"all\" to see what " +
+			"steps that passed printed. Set `timeout` (seconds) for any job that might not " +
+			"terminate, such as one that starts a server or a file watcher; without it a " +
+			"hanging step blocks this call indefinitely.",
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:    false,
 			IdempotentHint:  false,
 			DestructiveHint: ptr(false),
 		},
-	}, wrap(runJob(uc.RunJob)))
+	}, wrap(log, runJob(t.RunJob)))
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "plan_job",
+		Description: "Resolve a job and report what abel would run: the image, the steps " +
+			"in order, which are skipped and why, and any warnings. Starts no container " +
+			"and does not touch the working tree. Call this before run_job when you need " +
+			"to know what a job will do.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+	}, wrap(log, planJob(t.RunJob)))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "get_failure",
 		Description: "Return the failure context captured by the last run of a job: " +
 			"the failing step, its command, exit code, the tail of its output, and its " +
-			"environment. Secrets are redacted.",
+			"environment. Secrets are redacted. If the tail is too short to diagnose the " +
+			"failure, re-run with run_job's `tail` set higher.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
-	}, wrap(getFailure(uc.GetFailure)))
+	}, wrap(log, getFailure(t.GetFailure)))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "mark_fixed",
-		Description: "Record that you believe a job's failure is fixed. This does not " +
-			"verify anything — call run_job afterwards to confirm, and let the developer " +
-			"review the diff.",
+		Description: "Record that you believe a job's failure is fixed, with a short note " +
+			"saying what you changed. The note is shown to the developer reviewing the diff. " +
+			"This verifies nothing; call run_job afterwards to confirm.",
 		Annotations: &mcp.ToolAnnotations{IdempotentHint: false},
-	}, wrap(markFixed(uc.MarkFixed)))
+	}, wrap(log, markFixed(t.MarkFixed)))
 
 	return server
 }
 
-// Serve runs the server over the given streams until the client disconnects or
-// ctx ends.
-//
-// The streams are parameters rather than os.Stdin/os.Stdout — the SDK's
-// StdioTransport reads the process's own — so the composition root stays the
-// only thing that knows about the process, and a test can drive a whole
-// session over pipes.
-//
-// Nothing else may write to out while this runs: it is the JSON-RPC stream.
-// abel's logger and its readiness banner both go to stderr for this reason.
 func Serve(ctx context.Context, server *mcp.Server, in io.Reader, out io.Writer) error {
 	transport := &mcp.IOTransport{
 		Reader: io.NopCloser(in),
@@ -103,19 +101,10 @@ func Serve(ctx context.Context, server *mcp.Server, in io.Reader, out io.Writer)
 	return errs.New(errs.KindOf(err), "mcpserver.Serve", "the MCP session ended").Wrapping(err)
 }
 
-// nopCloser adapts a Writer to the WriteCloser the transport wants. Closing
-// abel's stdout is the composition root's business, not the transport's.
 type nopCloser struct{ io.Writer }
 
 func (nopCloser) Close() error { return nil }
 
-// IsCleanShutdown reports whether err is the ordinary end of a session rather
-// than a failure.
-//
-// An agent closing its end of the pipe, or the developer pressing Ctrl-C, is
-// how every MCP session ends. Reporting either as an error would make `abel
-// mcp` exit non-zero on every normal run — and a supervisor that restarts on
-// non-zero would loop forever.
 func IsCleanShutdown(err error) bool {
 	if errors.Is(err, io.EOF) ||
 		errors.Is(err, mcp.ErrConnectionClosed) ||
@@ -123,44 +112,31 @@ func IsCleanShutdown(err error) bool {
 		errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
-	// The stdio transport reports a closed pipe as "server is closing: EOF",
-	// formatted with %v rather than %w, and its sentinel lives in the SDK's
-	// internal/jsonrpc2 package — so there is nothing to match on structurally.
-	// This is the one place in abel that inspects an error's text, and it is
-	// only ever applied to a third-party error.
-	//
-	// If an SDK upgrade changes this wording, `abel mcp` starts exiting 70 on
-	// every normal session; TestMCPServesOverPipesAndExitsCleanly (build tag:
-	// integration) is what catches that.
+
 	text := err.Error()
 	return strings.Contains(text, "server is closing") ||
 		strings.Contains(text, "connection closed")
 }
 
-// --- tool inputs and outputs ------------------------------------------------
-//
-// These structs are the tool schemas: the SDK infers JSON Schema from them, so
-// the field comments below are what the agent actually reads.
-
-// NoInput is the input schema of a tool that takes no arguments. It exists so
-// list_jobs does not inherit JobInput's required "job" property.
 type NoInput struct{}
 
-// JobInput identifies a job.
 type JobInput struct {
-	// Job is the workflow job ID, as it appears under `jobs:` in the workflow
-	// file. Use list_jobs if you do not know it.
 	Job string `json:"job" jsonschema:"the workflow job ID to act on"`
 }
 
-// RunJobInput asks abel to reproduce a job.
 type RunJobInput struct {
 	JobInput
-	// Image overrides the container image for every step.
-	Image string `json:"image,omitempty" jsonschema:"optional container image override"`
+	Image   string `json:"image,omitempty" jsonschema:"optional container image override"`
+	Tail    int    `json:"tail,omitempty" jsonschema:"log lines to keep in the failure context; default 200"`
+	Output  string `json:"output,omitempty" jsonschema:"which steps return their output: failed (default) or all"`
+	Timeout int    `json:"timeout,omitempty" jsonschema:"seconds before the run is abandoned; unset means no limit"`
 }
 
-// RunJobOutput is the result of a run.
+const (
+	outputAll   = "all"
+	opRunJobMCP = "mcpserver.run_job"
+)
+
 type RunJobOutput struct {
 	Job      string       `json:"job"`
 	Passed   bool         `json:"passed"`
@@ -168,60 +144,79 @@ type RunJobOutput struct {
 	Summary  string       `json:"summary"`
 	Steps    []StepOutput `json:"steps"`
 	Warnings []string     `json:"warnings,omitempty"`
-	// Failure is present exactly when Passed is false.
-	Failure *run.Failure `json:"failure,omitempty"`
+	Failure  *run.Failure `json:"failure,omitempty"`
 }
 
-// StepOutput is one step's outcome.
 type StepOutput struct {
-	Index      int    `json:"index"`
-	Name       string `json:"name"`
-	ExitCode   int    `json:"exit_code"`
-	Skipped    bool   `json:"skipped"`
-	SkipReason string `json:"skip_reason,omitempty"`
+	Index      int      `json:"index"`
+	Name       string   `json:"name"`
+	ExitCode   int      `json:"exit_code"`
+	Skipped    bool     `json:"skipped"`
+	SkipReason string   `json:"skip_reason,omitempty"`
+	Output     []string `json:"output,omitempty"`
 }
 
-// JobsOutput lists the jobs abel can reproduce.
+type PlanJobOutput struct {
+	Job      string       `json:"job"`
+	Image    string       `json:"image"`
+	Source   string       `json:"workflow_path"`
+	Steps    []StepOutput `json:"steps"`
+	Warnings []string     `json:"warnings,omitempty"`
+}
+
 type JobsOutput struct {
 	Jobs []app.JobRef `json:"jobs"`
 }
 
-// FailureOutput carries a captured failure.
 type FailureOutput struct {
 	Failure run.Failure `json:"failure"`
 }
 
-// MarkFixedOutput confirms a job was marked fixed.
+type MarkFixedInput struct {
+	JobInput
+	Note string `json:"note,omitempty" jsonschema:"what you changed, shown to the developer reviewing the diff"`
+}
+
 type MarkFixedOutput struct {
 	Job      string `json:"job"`
 	Fixed    bool   `json:"fixed"`
 	NextStep string `json:"next_step"`
 }
 
-// --- handlers ---------------------------------------------------------------
-
-func listJobs(uc *app.ListJobs) func(context.Context, NoInput) (JobsOutput, error) {
-	return func(ctx context.Context, _ NoInput) (JobsOutput, error) {
+func listJobs(uc *app.ListJobs) func(context.Context, *mcp.CallToolRequest, NoInput) (JobsOutput, error) {
+	return func(ctx context.Context, _ *mcp.CallToolRequest, _ NoInput) (JobsOutput, error) {
 		refs, err := uc.Execute(ctx)
 		return JobsOutput{Jobs: refs}, err
 	}
 }
 
-func runJob(uc *app.RunJob) func(context.Context, RunJobInput) (RunJobOutput, error) {
-	return func(ctx context.Context, in RunJobInput) (RunJobOutput, error) {
+func runJob(uc *app.RunJob) func(context.Context, *mcp.CallToolRequest, RunJobInput) (RunJobOutput, error) {
+	return func(ctx context.Context, req *mcp.CallToolRequest, in RunJobInput) (RunJobOutput, error) {
 		plan, err := uc.Plan(ctx, in.Job, workflow.Options{Image: in.Image})
 		if err != nil {
 			return RunJobOutput{}, err
 		}
 
-		// Logs are nil: an agent wants the captured tail, not a live stream it
-		// would have to buffer anyway.
-		result, err := uc.Execute(ctx, app.RunJobInput{
-			JobID:   in.Job,
-			Resolve: workflow.Options{Image: in.Image},
-		})
+		runCtx := ctx
+		if in.Timeout > 0 {
+			timed, cancel := context.WithTimeout(ctx, time.Duration(in.Timeout)*time.Second)
+			defer cancel()
+			runCtx = timed
+		}
+
+		runIn := app.RunJobInput{
+			JobID:         in.Job,
+			Resolve:       workflow.Options{Image: in.Image},
+			LogTailLines:  in.Tail,
+			CaptureOutput: in.Output == outputAll,
+		}
+		if report := progressReporter(ctx, req, len(plan.Steps)); report != nil {
+			runIn.OnStepEnd = report
+		}
+
+		result, err := uc.Execute(runCtx, runIn)
 		if err != nil {
-			return RunJobOutput{}, err
+			return RunJobOutput{}, timeoutError(runCtx, ctx, err, in)
 		}
 
 		out := RunJobOutput{
@@ -236,10 +231,11 @@ func runJob(uc *app.RunJob) func(context.Context, RunJobInput) (RunJobOutput, er
 		for _, s := range result.Steps {
 			out.Steps = append(out.Steps, StepOutput{
 				Index:      s.Step.Index,
-				Name:       s.Step.Name,
+				Name:       run.RedactText(s.Step.Name, s.Step.Env),
 				ExitCode:   s.ExitCode,
 				Skipped:    s.Skipped,
 				SkipReason: s.Step.SkipReason,
+				Output:     s.Output,
 			})
 		}
 		for _, w := range plan.Warnings {
@@ -249,16 +245,75 @@ func runJob(uc *app.RunJob) func(context.Context, RunJobInput) (RunJobOutput, er
 	}
 }
 
-func getFailure(uc *app.GetFailure) func(context.Context, JobInput) (FailureOutput, error) {
-	return func(ctx context.Context, in JobInput) (FailureOutput, error) {
+func progressReporter(ctx context.Context, req *mcp.CallToolRequest, total int) func(run.StepResult) {
+	if req == nil || req.Session == nil || req.Params == nil {
+		return nil
+	}
+	token := req.Params.GetProgressToken()
+	if token == nil {
+		return nil
+	}
+
+	return func(result run.StepResult) {
+		_ = req.Session.NotifyProgress(ctx, &mcp.ProgressNotificationParams{
+			ProgressToken: token,
+			Progress:      float64(result.Step.Index + 1),
+			Total:         float64(total),
+			Message:       run.RedactText(result.Step.Name, result.Step.Env),
+		})
+	}
+}
+
+func timeoutError(runCtx, parent context.Context, err error, in RunJobInput) error {
+	if in.Timeout <= 0 || parent.Err() != nil ||
+		!errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+		return err
+	}
+	return errs.New(errs.KindCancelled, opRunJobMCP,
+		"job %q did not finish within its %ds timeout; raise run_job's `timeout`, "+
+			"or the step it stopped on does not terminate", in.Job, in.Timeout).
+		With("job", in.Job).Wrapping(err)
+}
+
+func planJob(uc *app.RunJob) func(context.Context, *mcp.CallToolRequest, RunJobInput) (PlanJobOutput, error) {
+	return func(ctx context.Context, _ *mcp.CallToolRequest, in RunJobInput) (PlanJobOutput, error) {
+		plan, err := uc.Plan(ctx, in.Job, workflow.Options{Image: in.Image})
+		if err != nil {
+			return PlanJobOutput{}, err
+		}
+
+		out := PlanJobOutput{
+			Job:      plan.JobID,
+			Image:    plan.Image,
+			Source:   plan.Source,
+			Steps:    make([]StepOutput, 0, len(plan.Steps)),
+			Warnings: make([]string, 0, len(plan.Warnings)),
+		}
+		for _, s := range plan.Steps {
+			out.Steps = append(out.Steps, StepOutput{
+				Index:      s.Index,
+				Name:       run.RedactText(s.Name, s.Env),
+				Skipped:    s.Skip,
+				SkipReason: s.SkipReason,
+			})
+		}
+		for _, w := range plan.Warnings {
+			out.Warnings = append(out.Warnings, w.String())
+		}
+		return out, nil
+	}
+}
+
+func getFailure(uc *app.GetFailure) func(context.Context, *mcp.CallToolRequest, JobInput) (FailureOutput, error) {
+	return func(ctx context.Context, _ *mcp.CallToolRequest, in JobInput) (FailureOutput, error) {
 		failure, err := uc.Execute(ctx, in.Job)
 		return FailureOutput{Failure: failure}, err
 	}
 }
 
-func markFixed(uc *app.MarkFixed) func(context.Context, JobInput) (MarkFixedOutput, error) {
-	return func(ctx context.Context, in JobInput) (MarkFixedOutput, error) {
-		failure, err := uc.Execute(ctx, in.Job)
+func markFixed(uc *app.MarkFixed) func(context.Context, *mcp.CallToolRequest, MarkFixedInput) (MarkFixedOutput, error) {
+	return func(ctx context.Context, _ *mcp.CallToolRequest, in MarkFixedInput) (MarkFixedOutput, error) {
+		failure, err := uc.Execute(ctx, in.Job, in.Note)
 		if err != nil {
 			return MarkFixedOutput{}, err
 		}
@@ -270,39 +325,33 @@ func markFixed(uc *app.MarkFixed) func(context.Context, JobInput) (MarkFixedOutp
 	}
 }
 
-// --- error mapping ----------------------------------------------------------
+func wrap[In, Out any](
+	log *slog.Logger, h func(context.Context, *mcp.CallToolRequest, In) (Out, error),
+) mcp.ToolHandlerFor[In, Out] {
+	return func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, Out, error) {
+		name := ""
+		if req != nil && req.Params != nil {
+			name = req.Params.Name
+		}
+		log.Info("tool_call", "tool", name)
 
-// wrap adapts a plain use-case function to an MCP tool handler and is the
-// single place abel's error taxonomy meets MCP — the counterpart of
-// cli.ExitCode.
-//
-// Errors become tool errors rather than protocol errors: the agent is supposed
-// to read them and react, not treat the session as broken.
-func wrap[In, Out any](h func(context.Context, In) (Out, error)) mcp.ToolHandlerFor[In, Out] {
-	return func(ctx context.Context, _ *mcp.CallToolRequest, in In) (*mcp.CallToolResult, Out, error) {
-		out, err := h(ctx, in)
+		out, err := h(ctx, req, in)
 		if err != nil {
 			var zero Out
-			// Returning the error rather than a hand-built result is deliberate:
-			// the SDK turns it into an IsError result *and* skips validating the
-			// zero output against the tool's output schema, which a hand-built
-			// error result does not.
+
+			log.Error("tool_failed", "tool", name, "kind", string(errs.KindOf(err)), "error", err.Error())
 			return nil, zero, &agentError{err: err}
 		}
+		log.Debug("tool_ok", "tool", name)
 		return nil, out, nil
 	}
 }
 
-// agentError renders an abel error the way an agent should read it. It keeps
-// the wrapped error in the chain so errors.Is/As still work above it.
 type agentError struct{ err error }
 
 func (e *agentError) Error() string { return agentMessage(e.err) }
 func (e *agentError) Unwrap() error { return e.err }
 
-// agentMessage turns an error into something an agent can act on. The Kind is
-// included because it tells the agent whether to retry, ask the user, or give
-// up — which a prose message alone does not.
 func agentMessage(err error) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[%s] %s", errs.KindOf(err), err.Error())
@@ -315,11 +364,10 @@ func agentMessage(err error) string {
 			"do not retry in a loop.")
 	case errs.KindUnsupported:
 		b.WriteString("\n\nHint: abel reproduces `run:` steps only. This is a limitation, not a bug " +
-			"in the workflow — do not try to work around it by editing the workflow file.")
+			"in the workflow; do not try to work around it by editing the workflow file.")
 	case errs.KindCancelled:
 		b.WriteString("\n\nHint: the developer interrupted the run.")
 	case errs.KindValidation, errs.KindConflict, errs.KindStepFailed, errs.KindInternal:
-		// No extra guidance: the message already says what to do.
 	}
 	return b.String()
 }

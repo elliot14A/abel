@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/elliot14A/abel/internal/app"
+	"github.com/elliot14A/abel/internal/core/errs"
 	"github.com/elliot14A/abel/internal/core/run"
 	"github.com/elliot14A/abel/internal/core/run/runfake"
 	"github.com/elliot14A/abel/internal/core/workflow"
@@ -35,11 +38,14 @@ type fixedWorkflows struct{ files []workflow.File }
 
 func (f fixedWorkflows) Load(context.Context) ([]workflow.File, error) { return f.files, nil }
 
-// connect wires a real MCP server to a real MCP client over the SDK's
-// in-memory transport, so these tests exercise the actual protocol — schema
-// inference, tool dispatch, error payloads — rather than calling handlers
-// directly.
 func connect(t *testing.T, runner run.Runner, failures app.FailureStore) *mcp.ClientSession {
+	t.Helper()
+	return connectWith(t, runner, failures, nil)
+}
+
+func connectWith(
+	t *testing.T, runner run.Runner, failures app.FailureStore, opts *mcp.ClientOptions,
+) *mcp.ClientSession {
 	t.Helper()
 
 	file, err := workflow.Parse(".github/workflows/ci.yml", []byte(ciWorkflow))
@@ -49,16 +55,15 @@ func connect(t *testing.T, runner run.Runner, failures app.FailureStore) *mcp.Cl
 	workflows := fixedWorkflows{files: []workflow.File{file}}
 	clock := run.ClockFunc(func() time.Time { return time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC) })
 
-	server := mcpserver.New("test", mcpserver.UseCases{
-		RunJob:     app.NewRunJob(workflows, runner, failures, clock),
+	server := mcpserver.New("test", mcpserver.Tools{
+		RunJob:     app.NewRunJob(workflows, runner, failures, clock, nil),
 		GetFailure: app.NewGetFailure(failures),
-		MarkFixed:  app.NewMarkFixed(failures),
+		MarkFixed:  app.NewMarkFixed(failures, clock),
 		ListJobs:   app.NewListJobs(workflows),
 	})
 
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
-	// The server's error is reported in Cleanup rather than from the goroutine:
-	// calling t.Errorf after the test has finished panics.
+
 	serverErr := make(chan error, 1)
 	go func() { serverErr <- server.Run(t.Context(), serverTransport) }()
 	t.Cleanup(func() {
@@ -72,7 +77,7 @@ func connect(t *testing.T, runner run.Runner, failures app.FailureStore) *mcp.Cl
 		}
 	})
 
-	client := mcp.NewClient(&mcp.Implementation{Name: "test-agent", Version: "1"}, nil)
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-agent", Version: "1"}, opts)
 	session, err := client.Connect(t.Context(), clientTransport, nil)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
@@ -136,8 +141,8 @@ func TestServerExposesTheAgentfixToolSurface(t *testing.T) {
 			t.Errorf("tool %q has no input schema", tool.Name)
 		}
 	}
-	// The shared agentfix contract: run_*, get_*, mark_fixed.
-	for _, want := range []string{"run_job", "get_failure", "mark_fixed", "list_jobs"} {
+
+	for _, want := range []string{"run_job", "plan_job", "get_failure", "mark_fixed", "list_jobs"} {
 		if !got[want] {
 			t.Errorf("tool %q is missing; have %v", want, got)
 		}
@@ -161,8 +166,7 @@ func TestRunJobToolReportsAFailure(t *testing.T) {
 	if out.Failure.StepName != "typecheck" || out.Failure.ExitCode != 2 {
 		t.Errorf("failure = %+v", *out.Failure)
 	}
-	// The skipped checkout must be reported with its reason, so the agent does
-	// not conclude the step passed.
+
 	if len(out.Steps) != 2 || !out.Steps[0].Skipped || out.Steps[0].SkipReason == "" {
 		t.Errorf("steps = %+v", out.Steps)
 	}
@@ -177,7 +181,6 @@ func TestGetFailureAndMarkFixedRoundTrip(t *testing.T) {
 	failures := store.NewMemory()
 	session := connect(t, runfake.Failing("typecheck", 1, "boom\n"), failures)
 
-	// Nothing has run yet.
 	res := call(t, session, "get_failure", map[string]any{"job": "lint"})
 	if !res.IsError {
 		t.Fatal("get_failure on a job that never ran succeeded")
@@ -204,7 +207,6 @@ func TestGetFailureAndMarkFixedRoundTrip(t *testing.T) {
 		t.Errorf("mark_fixed does not tell the agent to verify: %q", fixed.NextStep)
 	}
 
-	// Marking twice without a re-run is a conflict the agent must see.
 	if res := call(t, session, "mark_fixed", map[string]any{"job": "lint"}); !res.IsError {
 		t.Error("a second mark_fixed succeeded")
 	}
@@ -223,8 +225,7 @@ func TestToolErrorsCarryKindAndGuidance(t *testing.T) {
 	if !strings.Contains(msg, "DEPENDENCY_UNAVAILABLE") {
 		t.Errorf("error text does not carry the kind: %s", msg)
 	}
-	// An agent that retries a dead daemon in a loop is the failure mode this
-	// hint exists to prevent.
+
 	if !strings.Contains(msg, "do not retry in a loop") {
 		t.Errorf("error text does not tell the agent to stop: %s", msg)
 	}
@@ -259,5 +260,302 @@ func TestIsCleanShutdown(t *testing.T) {
 	}
 	if mcpserver.IsCleanShutdown(errors.New("connection reset by peer")) {
 		t.Error("a real transport failure was treated as a clean shutdown")
+	}
+}
+
+func TestPlanJobReportsTheResolvedPlan(t *testing.T) {
+	t.Parallel()
+
+	session := connect(t, &runfake.Runner{}, store.NewMemory())
+	out := decode[mcpserver.PlanJobOutput](t,
+		call(t, session, "plan_job", map[string]any{"job": "lint"}))
+
+	if out.Job != "lint" || out.Image == "" {
+		t.Errorf("job = %q, image = %q; want the resolved job and image", out.Job, out.Image)
+	}
+	if out.Source != ".github/workflows/ci.yml" {
+		t.Errorf("workflow_path = %q, want the source file", out.Source)
+	}
+
+	want := []mcpserver.StepOutput{
+		{
+			Index:      0,
+			Name:       "actions/checkout@v4",
+			Skipped:    true,
+			SkipReason: "skipped `actions/checkout`: your working tree is already mounted",
+		},
+		{Index: 1, Name: "typecheck"},
+	}
+	if diff := cmp.Diff(want, out.Steps); diff != "" {
+		t.Errorf("steps mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestPlanJobStartsNoContainer(t *testing.T) {
+	t.Parallel()
+
+	runner := &runfake.Runner{}
+	session := connect(t, runner, store.NewMemory())
+
+	call(t, session, "plan_job", map[string]any{"job": "lint"})
+
+	if n := len(runner.Sessions()); n != 0 {
+		t.Errorf("plan_job started %d container session(s); it must touch nothing", n)
+	}
+}
+
+func TestPlanJobHonoursTheImageOverride(t *testing.T) {
+	t.Parallel()
+
+	session := connect(t, &runfake.Runner{}, store.NewMemory())
+	out := decode[mcpserver.PlanJobOutput](t,
+		call(t, session, "plan_job", map[string]any{"job": "lint", "image": "alpine:3"}))
+
+	if out.Image != "alpine:3" {
+		t.Errorf("image = %q, want the override", out.Image)
+	}
+}
+
+func TestPlanJobOnAnUnknownJobIsNotFound(t *testing.T) {
+	t.Parallel()
+
+	session := connect(t, &runfake.Runner{}, store.NewMemory())
+	res := call(t, session, "plan_job", map[string]any{"job": "nope"})
+
+	if !res.IsError {
+		t.Fatal("plan_job succeeded for a job that does not exist")
+	}
+	body := text(res)
+	if !strings.Contains(body, string(errs.KindNotFound)) {
+		t.Errorf("error %q does not carry the NOT_FOUND kind", body)
+	}
+	if !strings.Contains(body, "lint") {
+		t.Errorf("error %q does not list the available jobs", body)
+	}
+}
+
+func TestRunJobHonoursTheTailRequest(t *testing.T) {
+	t.Parallel()
+
+	var lines strings.Builder
+	for i := range 50 {
+		fmt.Fprintf(&lines, "line %d\n", i)
+	}
+	runner := &runfake.Runner{
+		Steps: map[string]runfake.Script{
+			"typecheck": {Output: lines.String(), ExitCode: 2},
+		},
+	}
+
+	tests := []struct {
+		name string
+		args map[string]any
+		want int
+	}{
+		{name: "an explicit tail caps the log", args: map[string]any{"job": "lint", "tail": 5}, want: 5},
+		{name: "omitting tail keeps the default", args: map[string]any{"job": "lint"}, want: 50},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			session := connect(t, runner, store.NewMemory())
+			out := decode[mcpserver.RunJobOutput](t, call(t, session, "run_job", tt.args))
+
+			if out.Failure == nil {
+				t.Fatal("run_job reported no failure for a step that exited 2")
+			}
+			if got := len(out.Failure.LogTail); got != tt.want {
+				t.Errorf("log tail has %d line(s), want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRunJobTailKeepsTheMostRecentLines(t *testing.T) {
+	t.Parallel()
+
+	runner := &runfake.Runner{
+		Steps: map[string]runfake.Script{
+			"typecheck": {Output: "first\nsecond\nthird\n", ExitCode: 1},
+		},
+	}
+	session := connect(t, runner, store.NewMemory())
+	out := decode[mcpserver.RunJobOutput](t,
+		call(t, session, "run_job", map[string]any{"job": "lint", "tail": 2}))
+
+	if out.Failure == nil {
+		t.Fatal("run_job reported no failure")
+	}
+	if diff := cmp.Diff([]string{"second", "third"}, out.Failure.LogTail); diff != "" {
+		t.Errorf("tail mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestRunJobReturnsStepOutputOnlyWhenAsked(t *testing.T) {
+	t.Parallel()
+
+	newRunner := func() *runfake.Runner {
+		return &runfake.Runner{Steps: map[string]runfake.Script{
+			"typecheck": {Output: "checking\nall good\n"},
+		}}
+	}
+
+	t.Run("the default returns none", func(t *testing.T) {
+		t.Parallel()
+
+		session := connect(t, newRunner(), store.NewMemory())
+		out := decode[mcpserver.RunJobOutput](t,
+			call(t, session, "run_job", map[string]any{"job": "lint"}))
+
+		for _, s := range out.Steps {
+			if len(s.Output) != 0 {
+				t.Errorf("step %d returned output without being asked: %q", s.Index+1, s.Output)
+			}
+		}
+	})
+
+	t.Run("output all returns every step", func(t *testing.T) {
+		t.Parallel()
+
+		session := connect(t, newRunner(), store.NewMemory())
+		out := decode[mcpserver.RunJobOutput](t,
+			call(t, session, "run_job", map[string]any{"job": "lint", "output": "all"}))
+
+		var typecheck *mcpserver.StepOutput
+		for i, s := range out.Steps {
+			if s.Name == "typecheck" {
+				typecheck = &out.Steps[i]
+			}
+		}
+		if typecheck == nil {
+			t.Fatalf("no typecheck step in %+v", out.Steps)
+		}
+		if diff := cmp.Diff([]string{"checking", "all good"}, typecheck.Output); diff != "" {
+			t.Errorf("output mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+func TestRunJobTimeoutIsReportedClearly(t *testing.T) {
+	t.Parallel()
+
+	runner := &runfake.Runner{Steps: map[string]runfake.Script{
+		"typecheck": {Delay: 30 * time.Second},
+	}}
+	session := connect(t, runner, store.NewMemory())
+
+	res := call(t, session, "run_job", map[string]any{"job": "lint", "timeout": 1})
+	if !res.IsError {
+		t.Fatal("a run that outlived its timeout reported success")
+	}
+
+	body := text(res)
+	for _, want := range []string{string(errs.KindCancelled), "1s timeout", "lint"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("error %q is missing %q", body, want)
+		}
+	}
+}
+
+func TestRunJobWithoutATimeoutIsUnbounded(t *testing.T) {
+	t.Parallel()
+
+	runner := &runfake.Runner{Steps: map[string]runfake.Script{
+		"typecheck": {Delay: 50 * time.Millisecond},
+	}}
+	session := connect(t, runner, store.NewMemory())
+
+	out := decode[mcpserver.RunJobOutput](t,
+		call(t, session, "run_job", map[string]any{"job": "lint"}))
+	if !out.Passed {
+		t.Errorf("a slow but finite run failed without a timeout: %s", out.Summary)
+	}
+}
+
+type progressLog struct {
+	mu   sync.Mutex
+	seen []*mcp.ProgressNotificationParams
+}
+
+func (p *progressLog) add(params *mcp.ProgressNotificationParams) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.seen = append(p.seen, params)
+}
+
+func (p *progressLog) all() []*mcp.ProgressNotificationParams {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]*mcp.ProgressNotificationParams(nil), p.seen...)
+}
+
+func (p *progressLog) waitFor(t *testing.T, n int) []*mcp.ProgressNotificationParams {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got := p.all()
+		if len(got) >= n || time.Now().After(deadline) {
+			return got
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func connectWithProgress(
+	t *testing.T, runner run.Runner, failures app.FailureStore, log *progressLog,
+) *mcp.ClientSession {
+	t.Helper()
+	return connectWith(t, runner, failures, &mcp.ClientOptions{
+		ProgressNotificationHandler: func(_ context.Context, req *mcp.ProgressNotificationClientRequest) {
+			log.add(req.Params)
+		},
+	})
+}
+
+func TestRunJobReportsProgressWhenTheClientAsks(t *testing.T) {
+	t.Parallel()
+
+	var log progressLog
+	session := connectWithProgress(t, &runfake.Runner{}, store.NewMemory(), &log)
+
+	params := &mcp.CallToolParams{
+		Name:      "run_job",
+		Arguments: map[string]any{"job": "lint"},
+	}
+	params.SetProgressToken("t-1")
+	if _, err := session.CallTool(t.Context(), params); err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+
+	seen := log.waitFor(t, 1)
+	if len(seen) == 0 {
+		t.Fatal("the client asked for progress and received none")
+	}
+	for _, p := range seen {
+		if p.ProgressToken != "t-1" {
+			t.Errorf("notification carried token %v, want t-1", p.ProgressToken)
+		}
+		if p.Total != 2 {
+			t.Errorf("total = %v, want 2 (the plan's step count)", p.Total)
+		}
+	}
+	last := seen[len(seen)-1]
+	if last.Message != "typecheck" {
+		t.Errorf("final message = %q, want the last step's name", last.Message)
+	}
+}
+
+func TestRunJobIsSilentWhenNoProgressTokenIsSent(t *testing.T) {
+	t.Parallel()
+
+	var log progressLog
+	session := connectWithProgress(t, &runfake.Runner{}, store.NewMemory(), &log)
+
+	call(t, session, "run_job", map[string]any{"job": "lint"})
+
+	if seen := log.all(); len(seen) != 0 {
+		t.Errorf("sent %d unrequested progress notification(s)", len(seen))
 	}
 }
