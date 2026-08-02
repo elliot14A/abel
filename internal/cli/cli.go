@@ -13,11 +13,12 @@ import (
 
 var Version = "dev"
 
-const description = `abel - run your CI locally before you push.
+const description = `abel - reproduce a failing CI job locally, and hand it to your coding agent.
 
-Reproduce a GitHub Actions job's run: steps in the real container, stream the
-logs, and when a step fails, capture the failure context so your coding agent
-can fix it, then re-run.`
+Runs a GitHub Actions job's run: steps in the container the job declares and
+captures the failure context when a step fails. Run "abel mcp" to serve that
+context to an agent over MCP, which is how abel is meant to be driven; the other
+commands are the same tool for when you want to drive it yourself.`
 
 type IO struct {
 	In       io.Reader

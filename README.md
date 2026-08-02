@@ -1,14 +1,21 @@
 # abel
 
-> Run your CI locally before you push. Named after Abel (The Weeknd): soundcheck
-> before the show.
+> Reproduce a failing CI job locally and hand it to your coding agent, over MCP.
 
-`abel` reproduces a GitHub Actions job's `run:` steps locally, in the real
-container, streams the logs, and captures the failure context when a step fails.
+`abel` runs a GitHub Actions job's `run:` steps in the container the job
+declares, streams the logs, and captures the failure context when a step fails:
+the failing step, its command, the exit code, the tail of its output, and the
+line in the workflow file.
 
-Run it yourself from a terminal, or let your coding agent drive it over MCP.
-Both go through the same code path, so they cannot disagree about what your CI
-does.
+That context exists to be handed to an agent. `abel mcp` serves it over MCP, so
+an agent can list the jobs, plan one without touching your tree, run it, read
+why it failed, fix it, and run it again to check. It sees structured JSON rather
+than scraped terminal output, gets progress while a job runs, and can bound a
+job that might not terminate. Secrets are redacted before any of it leaves the
+process.
+
+The CLI is the same tool for when you want to drive it yourself. Both go through
+one code path, so they cannot disagree about what your CI does.
 
 It targets the push-wait-fail loop rather than full CI emulation. For a complete
 local runner, use [`act`](https://github.com/nektos/act).
