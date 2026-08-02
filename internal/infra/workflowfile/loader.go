@@ -1,8 +1,3 @@
-// Package workflowfile reads workflow documents from a repository checkout.
-//
-// It is the only place that touches the filesystem for workflows; the parsing
-// itself lives in core/workflow, which is why the parser can be fuzzed and
-// unit-tested from bytes alone.
 package workflowfile
 
 import (
@@ -20,31 +15,19 @@ import (
 
 const opLoad = "workflowfile.Load"
 
-// DefaultDir is where GitHub keeps workflows.
 const DefaultDir = ".github/workflows"
 
-// maxFileSize bounds a single workflow document. A workflow file is a few
-// kilobytes; anything past this is a mistake or a hostile input, and either way
-// abel should say so rather than read it into memory.
-const maxFileSize = 1 << 20 // 1 MiB
+const maxFileSize = 1 << 20
 
-// Loader reads and parses every workflow in a directory.
 type Loader struct {
 	root string
 	dir  string
 }
 
-// NewLoader returns a loader that reads dir and reports workflow paths
-// relative to root.
-//
-// The relative path is not cosmetic: it is what appears in every error, in the
-// failure context an agent receives, and in the demo GIF. ".github/workflows/
-// ci.yml" is recognisable; a 90-character absolute path is noise.
 func NewLoader(root, dir string) *Loader {
 	return &Loader{root: root, dir: dir}
 }
 
-// displayPath renders a path relative to the root when it is underneath it.
 func (l *Loader) displayPath(path string) string {
 	if l.root == "" {
 		return path
@@ -56,20 +39,12 @@ func (l *Loader) displayPath(path string) string {
 	return rel
 }
 
-// Dir returns the directory the loader reads.
-func (l *Loader) Dir() string { return l.dir }
-
-// Load parses every .yml/.yaml file in the directory, in filename order.
-//
-// One unparseable document fails the whole load: silently skipping it would
-// mean `abel run <job>` reporting "no such job" for a job that is right there,
-// which is the most confusing failure mode available.
 func (l *Loader) Load(ctx context.Context) ([]workflow.File, error) {
 	entries, err := os.ReadDir(l.dir)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return nil, errs.New(errs.KindNotFound, opLoad,
-			"no workflow directory at %s — is this the root of a repository with GitHub Actions?", l.dir).
+			"no workflow directory at %s; is this the root of a repository with GitHub Actions?", l.dir).
 			With("dir", l.dir)
 	case err != nil:
 		return nil, errs.New(errs.KindDependency, opLoad,
