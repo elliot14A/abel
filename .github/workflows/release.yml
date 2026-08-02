@@ -1,11 +1,24 @@
 name: Release
 
+# A push to main cuts the next patch release. A tag pushed by hand releases that
+# version instead, which is how a minor or major is cut; the next push to main
+# continues from it.
+#
+# The tag and the release run in one job on purpose: a tag pushed with
+# GITHUB_TOKEN does not trigger another workflow, so splitting them would tag and
+# never release.
 on:
   push:
+    branches: [main]
     tags: ["v*"]
 
 permissions:
   contents: write
+
+# Never cut two versions at once, and never cancel a release half way.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   goreleaser:
@@ -20,7 +33,28 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: release
+      - name: Tag the next patch version
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          set -euo pipefail
+          latest=$(git tag --list 'v*' --sort=-v:refname \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | head -n1 || true)
+
+          if [ -z "$latest" ]; then
+            next=v0.1.0
+          else
+            IFS=. read -r major minor patch <<<"${latest#v}"
+            next="v${major}.${minor}.$((patch + 1))"
+          fi
+
+          echo "previous: ${latest:-none}"
+          echo "next:     $next"
+          git tag "$next"
+          git push origin "$next"
+
+      - name: Release
         run: go tool goreleaser release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
