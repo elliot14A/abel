@@ -121,7 +121,7 @@ func text(res *mcp.CallToolResult) string {
 	return b.String()
 }
 
-func TestServerExposesTheAgentfixToolSurface(t *testing.T) {
+func TestServerExposesTheWholeToolSurface(t *testing.T) {
 	t.Parallel()
 
 	session := connect(t, &runfake.Runner{}, store.NewMemory())

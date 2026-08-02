@@ -17,9 +17,6 @@ process.
 The CLI is the same tool for when you want to drive it yourself. Both go through
 one code path, so they cannot disagree about what your CI does.
 
-It targets the push-wait-fail loop rather than full CI emulation. For a complete
-local runner, use [`act`](https://github.com/nektos/act).
-
 ```console
 $ abel run lint
 abel lint  catthehacker/ubuntu:act-latest
@@ -86,8 +83,7 @@ abel run lint --fix claude-code  # hand the failure to an agent, then re-run
 }
 ```
 
-Five tools, the shared `agentfix` contract abel implements alongside
-[`mob`](https://github.com/elliot14A/mob):
+Five tools:
 
 | tool | what it does |
 |---|---|
@@ -187,9 +183,7 @@ contract suite runs against both the fake and the real store to keep the fake
 honest. The workflow parser is fuzzed, which is how the panic it now guards
 against was found.
 
-See [AGENTS.md](./AGENTS.md) for the conventions, and
-[GO-STANDARDS.md](https://github.com/elliot14A/standards) for the house standard
-this instantiates.
+See [AGENTS.md](./AGENTS.md) for the conventions.
 
 ## Development
 

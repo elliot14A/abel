@@ -1,8 +1,6 @@
 # AGENTS.md: abel
 
-Instructions for any agent (or human) writing code in this repository. It is
-self-contained: you do not need to read the house standard to follow it, but
-this repo is an instance of **GO-STANDARDS.md**, archetype *CLI + MCP tool*.
+Instructions for any agent (or human) writing code in this repository.
 
 ---
 
