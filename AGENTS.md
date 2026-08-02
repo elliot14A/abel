@@ -1,4 +1,4 @@
-# AGENTS.md — abel
+# AGENTS.md: abel
 
 Instructions for any agent (or human) writing code in this repository. It is
 self-contained: you do not need to read the house standard to follow it, but
@@ -12,24 +12,24 @@ this repo is an instance of **GO-STANDARDS.md**, archetype *CLI + MCP tool*.
 reasonable interpretation, ask instead of guessing.
 
 **Then read, in this order:**
-1. `internal/core/errs/errs.go` — the error taxonomy everything is classified by.
-2. `internal/core/run/ports.go` — the seam between the pure core and Docker.
-3. `internal/app/runjob.go` — the central use-case; every transport calls it.
+1. `internal/core/errs/errs.go`, the error taxonomy everything is classified by.
+2. `internal/core/run/ports.go`, the seam between the pure core and Docker.
+3. `internal/app/runjob.go`, the central use-case; every transport calls it.
 
 Three rules that override any instinct you bring with you:
 
 - **A failing workflow step is not an error.** It is `Result.Failure` with a nil
   `error`. `error` means *abel* could not do its job. Getting this backwards
   breaks the exit codes, the MCP payloads and the entire product story.
-- **Honesty over emulation.** abel is not `act`. When it cannot reproduce
-  something (a matrix, an `if:`, a `uses:` action, a macOS runner) it says so —
-  a `run.Warning` or an `UNSUPPORTED` error — and never silently pretends.
+- **Honesty over emulation.** When abel cannot reproduce something (a matrix,
+  an `if:`, a `uses:` action, a macOS runner) it says so with a `run.Warning` or
+  an `UNSUPPORTED` error. It never silently pretends.
 - **Never leak a secret.** Every failure is redacted before it is stored,
   printed or served. See `run.Failure.Redact`.
 
 ---
 
-## 1. Architecture — three rings, dependencies point inward
+## 1. Architecture: three rings, dependencies point inward
 
 ```
 cmd/abel/main.go            process only: signals, streams, exit code (~20 lines)
@@ -45,7 +45,7 @@ internal/
     workflowfile/             reads .github/workflows
     store/                    persists failures (File + Memory)
     agent/                    --fix shell-out
-    logging/                  slog to stderr
+    logging/                  slog to a rotating file, and to stderr
   cli/                      transport 1: kong grammar + the composition root
   mcpserver/                transport 2: MCP tools over the same use-cases
   ui/                       human-facing rendering (pure string builders)
@@ -60,6 +60,17 @@ you want **a port** instead.
 Any logic you are tempted to write in either belongs in `app/`. The test for
 "is this in the right place?" is: *would the MCP server need this too?*
 
+Keep the MCP surface level with the CLI. `plan_job` and `--dry-run` are the same
+`app.RunJob.Plan` call; `run_job`'s `tail` and `timeout` are the same
+`app.RunJobInput.LogTailLines` and context deadline as `--tail` and `--timeout`.
+When you add a flag that changes what a run does, add it to the tool too, or say
+why not.
+
+An agent has no terminal and cannot press Ctrl-C, so anything a human gets from
+the terminal has to be reachable through the tool: step output via
+`output: "all"`, liveness via progress notifications, and an escape from a
+hanging step via `timeout`.
+
 ---
 
 ## 2. Errors
@@ -67,8 +78,8 @@ Any logic you are tempted to write in either belongs in `app/`. The test for
 One taxonomy, in `internal/core/errs`:
 
 ```
-VALIDATION · NOT_FOUND · CONFLICT · UNSUPPORTED
-DEPENDENCY_UNAVAILABLE · STEP_FAILED · CANCELLED · INTERNAL
+VALIDATION   NOT_FOUND   CONFLICT   UNSUPPORTED
+DEPENDENCY_UNAVAILABLE   STEP_FAILED   CANCELLED   INTERNAL
 ```
 
 - Classify at the point of failure: `errs.New(kind, op, format, args...)`.
@@ -78,8 +89,8 @@ DEPENDENCY_UNAVAILABLE · STEP_FAILED · CANCELLED · INTERNAL
 - Messages are lowercase, no trailing period, no "failed to", and say what the
   user should do next.
 
-**Adding a `Kind` means updating both mappers** — `cli.ExitCode` and
-`mcpserver.agentMessage` — or the `exhaustive` linter fails the build. That is
+**Adding a `Kind` means updating both mappers**, `cli.ExitCode` and
+`mcpserver.agentMessage`, or the `exhaustive` linter fails the build. That is
 the mechanism, not a suggestion.
 
 Exit codes are a public contract (`internal/cli/exitcode.go`); people put abel
@@ -124,7 +135,8 @@ The current set is deliberate and small. **Ask before adding one.**
 | Containers | `moby/moby/client` + `moby/moby/api` | `github.com/docker/docker` is deprecated (v29 moved it) |
 | MCP | `modelcontextprotocol/go-sdk` | official, v1-stable, Google co-maintained |
 | Rendering | `charm.land/lipgloss/v2` | note the module path moved off `github.com/charmbracelet` for v2 |
-| Logging | stdlib `log/slog` | JSON, **stderr only** |
+| Terminal size | `github.com/charmbracelet/x/term` | lipgloss v2 already links it; `GetSize` bounds the pull redraw |
+| Logging | stdlib `log/slog` | JSON; a rotating file under `.abel/logs`, plus stderr at `--log-level` |
 | Testing | stdlib + `google/go-cmp` | |
 
 `goccy/go-yaml` inside `core/workflow` is the **one** allowed exception to
@@ -141,13 +153,35 @@ golangci-lint`, never a globally installed one.
 - **stdout is sacred in `abel mcp`.** It is the JSON-RPC stream. Logs, progress
   and diagnostics go to **stderr**. One stray `fmt.Println` ends the session.
 - **`--json` means stdout carries one JSON document and nothing else.**
+- **Adapters report progress, they do not render it.** The Docker adapter folds
+  the daemon's pull stream into `run.PullStatus` and hands it to a
+  `run.PullReporter`; the glyphs live in `internal/ui` and the cursor games in
+  `internal/cli`. Nothing in `infra/` may write to a terminal. Anything that
+  redraws must degrade to a few plain lines when the stream is not a TTY.
+  `abel mcp` and CI both land there.
+- **A redraw must fit the terminal, or it corrupts the screen.** Cursor-up
+  arithmetic assumes one line is one row, so a painted block is clipped to the
+  live `term.GetSize` width *and* height. Truncate in `internal/ui`, on the
+  plain text, before styling: cutting a rendered string would split an ANSI
+  escape.
 - **Every container abel creates must be removed**, including on Ctrl-C.
   Cleanup runs on `context.WithoutCancel` with its own timeout, and containers
   carry `abel.job` / `abel.pid` labels so a leak is findable.
 - **Container names need their random suffix.** Without it, two runs of the
-  same job collide — the integration test caught exactly this.
+  same job collide. The integration test caught exactly this.
 - **`Redact` before `Put`, and again on read.** Defence in depth: a record
   written by an older abel still must not leak.
+- **Captured step output is raw command output, so redact it.** `run.RedactLines`
+  is the same secret set `Failure.Redact` uses. Anything that leaves the process
+  carrying what a step printed goes through it.
+- **A step's name is its command, so it is never safe to record raw.** An
+  unnamed `run:` step takes its label from the script's first line, which may
+  contain an inline secret. Pass it through `run.RedactText(name, step.Env)`
+  before it is logged, stored or served. `Failure.Redact` does the same for
+  `StepName`, `Command` and `LogTail`.
+- **Logging must never fail a run.** The rotating sink swallows its own write
+  and rotation errors; if the log directory cannot be opened, abel warns once
+  and carries on. A broken log is not a broken build.
 - **Skipped steps keep their index.** "step 3" must mean the same thing in the
   CLI, the logs, the MCP payload and the workflow file.
 - **The one `recover` in the codebase** is in `workflow.Parse`, guarding against
