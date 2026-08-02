@@ -35,7 +35,6 @@ linters:
     - unconvert
     - usestdlibvars
     - wastedassign
-    - godot # doc comments end in a period
     # --- security ---
     - gosec
 
@@ -53,11 +52,11 @@ linters:
             - "!**/internal/core/run/runfake/**"
           deny:
             - pkg: "os"
-              desc: "core is pure — take a port instead of touching the filesystem or environment"
+              desc: "core is pure; take a port instead of touching the filesystem or environment"
             - pkg: "os/exec"
-              desc: "core is pure — running processes belongs in internal/infra"
+              desc: "core is pure; running processes belongs in internal/infra"
             - pkg: "net/http"
-              desc: "core is pure — HTTP belongs in internal/infra"
+              desc: "core is pure; HTTP belongs in internal/infra"
             - pkg: "github.com/moby/moby"
               desc: "core must not know Docker exists; implement run.Runner in internal/infra/docker"
             - pkg: "github.com/modelcontextprotocol/go-sdk"
@@ -83,7 +82,7 @@ linters:
 
     errcheck:
       # Writing to the user's terminal is the one place where a failed write
-      # leaves nothing useful to do — the channel you would report it on is the
+      # leaves nothing useful to do: the channel you would report it on is the
       # one that just failed. Every other ignored error needs an explicit `_ =`
       # with a comment.
       exclude-functions:
@@ -105,9 +104,8 @@ linters:
 
     revive:
       rules:
-        - name: exported
-          disabled: false
-        - name: package-comments
+        # `exported` and `package-comments` are deliberately off: this codebase
+        # carries no comments. Re-enable them if that changes.
         - name: error-strings
         - name: error-naming
         - name: context-as-argument

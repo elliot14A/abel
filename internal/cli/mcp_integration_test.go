@@ -14,21 +14,9 @@ import (
 	"github.com/elliot14A/abel/internal/cli"
 )
 
-// initialize is the first message any MCP client sends.
 const initialize = `{"jsonrpc":"2.0","id":1,"method":"initialize","params":` +
 	`{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"1"}}}`
 
-// TestMCPServesOverPipesAndExitsCleanly drives `abel mcp` end to end over real
-// pipes, the way an agent does.
-//
-// It exists for two regressions caught here: `abel mcp` reported a client
-// disconnect — how every session ends — as an internal error and exited 70;
-// and it used the SDK's StdioTransport, which reads the process's own streams
-// and ignored the composition root's.
-//
-// It needs a Docker daemon because `abel mcp` builds its container client up
-// front, on purpose: an agent should not discover mid-session that Docker is
-// down.
 func TestMCPServesOverPipesAndExitsCleanly(t *testing.T) {
 	stdinR, stdinW := io.Pipe()
 	stdoutR, stdoutW := io.Pipe()
@@ -39,8 +27,7 @@ func TestMCPServesOverPipesAndExitsCleanly(t *testing.T) {
 		code := cli.Main(t.Context(),
 			[]string{"--repo", repo(t), "--color", "never", "mcp"},
 			cli.IO{In: stdinR, Out: stdoutW, Err: &stderr})
-		// Closing the write end unblocks the reader below if the session ends
-		// before it gets a response.
+
 		_ = stdoutW.Close()
 		exit <- code
 	}()
@@ -69,8 +56,6 @@ func TestMCPServesOverPipesAndExitsCleanly(t *testing.T) {
 		t.Fatalf("no response within 30s\nstderr: %s", stderr.String())
 	}
 
-	// stdout must carry the JSON-RPC stream and nothing else: one stray log
-	// line there ends the session for a real agent.
 	var response struct {
 		JSONRPC string          `json:"jsonrpc"`
 		ID      int             `json:"id"`
@@ -83,13 +68,12 @@ func TestMCPServesOverPipesAndExitsCleanly(t *testing.T) {
 		t.Errorf("unexpected initialize response: %s", first)
 	}
 
-	// Now hang up, as an agent does when it is finished.
 	_ = stdinW.Close()
 
 	select {
 	case code := <-exit:
 		if code != cli.ExitOK {
-			t.Errorf("exit = %d, want %d — a client disconnect is not a failure\nstderr: %s",
+			t.Errorf("exit = %d, want %d, a client disconnect is not a failure\nstderr: %s",
 				code, cli.ExitOK, stderr.String())
 		}
 	case <-time.After(30 * time.Second):

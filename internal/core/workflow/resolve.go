@@ -13,13 +13,6 @@ import (
 
 const opResolve = "workflow.Resolve"
 
-// RunnerImages maps `runs-on:` labels to the container image abel substitutes.
-// The Ubuntu images are the community act images, which carry the toolchains a
-// GitHub-hosted runner has; a bare ubuntu image would fail on the first
-// `setup-node`-shaped assumption.
-//
-// A label absent from this map is not an error if the job also declares
-// `container:` — an explicit image always wins.
 var RunnerImages = map[string]string{
 	"ubuntu-latest": "catthehacker/ubuntu:act-latest",
 	"ubuntu-24.04":  "catthehacker/ubuntu:act-24.04",
@@ -27,18 +20,11 @@ var RunnerImages = map[string]string{
 	"ubuntu-20.04":  "catthehacker/ubuntu:act-20.04",
 }
 
-// supportedShells are the shells abel knows how to invoke. GitHub supports
-// python, pwsh and cmd as well; abel refuses them rather than guessing.
 var supportedShells = []string{"bash", "sh"}
 
-// Options tunes resolution. The zero value is valid and uses the defaults.
 type Options struct {
-	// Workdir overrides the in-container mount point of the repository.
-	Workdir string
-	// Image overrides the image for every job, ignoring `runs-on:` and
-	// `container:`. This is what `abel run --image` sets.
-	Image string
-	// RunnerImages overrides the label-to-image map.
+	Workdir      string
+	Image        string
 	RunnerImages map[string]string
 }
 
@@ -56,12 +42,6 @@ func (o Options) runnerImages() map[string]string {
 	return RunnerImages
 }
 
-// Resolve turns one job of a workflow into a runnable plan, merging the three
-// layers of env and defaults, choosing an image, and classifying every step as
-// runnable or skipped.
-//
-// Resolution never silently drops a feature: anything abel does not honour
-// becomes a [run.Warning] on the plan.
 func Resolve(f File, jobID string, opts Options) (run.Plan, error) {
 	job, ok := f.Job(jobID)
 	if !ok {
@@ -128,7 +108,7 @@ func resolveImage(job Job, opts Options) (string, error) {
 			With("job", job.ID).With("line", fmt.Sprint(job.Line))
 	default:
 		return "", errs.New(errs.KindUnsupported, opResolve,
-			"job %q runs on %q, which abel has no local image for — "+
+			"job %q runs on %q, which abel has no local image for; "+
 				"add `container:` to the job or pass --image",
 			job.ID, strings.Join(job.RunsOn, ", ")).
 			With("job", job.ID).With("line", fmt.Sprint(job.Line))
@@ -207,9 +187,6 @@ func resolveStep(
 	return out, warnings, nil
 }
 
-// skipReasonFor explains, in the user's terms, why abel is not running a
-// `uses:` step. abel's scope is `run:` steps; the honest move is to say what it
-// skipped and why, not to half-emulate the action.
 func skipReasonFor(step Step) string {
 	action, _, _ := strings.Cut(step.Uses, "@")
 	switch {
@@ -219,7 +196,7 @@ func skipReasonFor(step Step) string {
 		return "skipped `actions/checkout`: your working tree is already mounted"
 	case strings.HasPrefix(action, "actions/setup-"):
 		return fmt.Sprintf(
-			"skipped %q: abel does not provision toolchains — use a `container:` image that has it",
+			"skipped %q: abel does not provision toolchains; use a `container:` image that has it",
 			step.Uses)
 	case strings.HasPrefix(action, "actions/cache"):
 		return fmt.Sprintf("skipped %q: caching is a no-op locally", step.Uses)
@@ -228,8 +205,6 @@ func skipReasonFor(step Step) string {
 	}
 }
 
-// containerPath resolves a workflow's working-directory (repo-relative, or
-// absolute) against the container mount point.
 func containerPath(workdir, dir string) string {
 	switch {
 	case dir == "":
@@ -241,8 +216,6 @@ func containerPath(workdir, dir string) string {
 	}
 }
 
-// mergeEnv layers environment maps left to right, later winning. It always
-// returns a fresh map, so no caller shares state with the workflow file.
 func mergeEnv(layers ...map[string]string) map[string]string {
 	out := map[string]string{}
 	for _, layer := range layers {
